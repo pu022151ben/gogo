@@ -29,8 +29,14 @@ def load_model():
     return joblib.load("model.pkl") if os.path.exists("model.pkl") else None
 
 ml_model = load_model()
-if ml_model: st.sidebar.success("🤖 AI 2.0 預測引擎：已連線")
-else: st.sidebar.error("⚠️ 找不到 model.pkl")
+if ml_model: 
+    st.sidebar.success("🤖 AI 2.0 預測引擎：已連線")
+    # 把 AI 要求的特徵印在側邊欄供隨時查閱
+    if hasattr(ml_model, "feature_names_in_"):
+        with st.sidebar.expander("🛠️ 模型要求的特徵名稱 (Debug)"):
+            st.write(list(ml_model.feature_names_in_))
+else: 
+    st.sidebar.error("⚠️ 找不到 model.pkl")
 
 # --- 2. 抓取全台股清單 ---
 @st.cache_data(ttl=86400)
@@ -63,14 +69,31 @@ tab1, tab2 = st.tabs(["🌙 步驟一：盤前 AI 選股 (無 API 限制)", "☀
 # ------------------------------------------
 with tab1:
     st.info("💡 操作提示：請在「前一天晚上」或「開盤前 08:30」執行此步驟。AI 將使用收盤後的正確資料進行大範圍掃描。")
-    c1, c2, c3, c4 = st.columns(4)
-    with c1: min_win_prob = st.slider("🎯 AI 預測勝率門檻 (%)", 30, 90, 45, step=5)
-    with c2: min_rvol = st.number_input("🔥 昨日 RVOL 爆發動能", min_value=0.5, value=1.0, step=0.1)
-    with c3: min_rs = st.number_input("💪 最低相對強度 RS (vs 大盤, %)", value=-5.0, step=1.0, help="個股近20日報酬 減去 大盤近20日報酬。")
-    with c4: use_market_filter = st.checkbox("🛡️ 大盤多頭過濾", value=False, help="加權指數需站上5日均線。")
+    c1, c2, c3, c4, c5 = st.columns(5)
+    with c1: min_win_prob = st.slider("🎯 AI 勝率門檻 (%)", 0, 90, 40, step=5)
+    with c2: min_vol = st.number_input("📉 最低成交量(張)", value=500, step=100)
+    with c3: min_rvol = st.number_input("🔥 昨日 RVOL", min_value=0.5, value=1.0, step=0.1)
+    with c4: min_rs = st.number_input("💪 最低 RS (%)", value=-5.0, step=1.0)
+    with c5: use_market_filter = st.checkbox("🛡️ 大盤多頭過濾", value=False)
 
     if st.button("🚀 啟動盤前 AI 大掃描 (1700+ 檔)"):
         if not ml_model: st.stop()
+
+        # 🚨 終極防禦：在掃描前直接比對特徵名稱！
+        if hasattr(ml_model, "feature_names_in_"):
+            expected_features = set(ml_model.feature_names_in_)
+            provided_features = {'Gap_0_2', 'Gap_2_4', 'Gap_4_6', 'Gap_6_9', 'Gap_Over_9', 'RVOL', 'EMA_Bullish', 'RSI_14', 'RSI_GoldenZone', 'MACD_Hist_Pos', 'Close_Above_BB', 'High_20D', 'High_55D', 'High_120D', 'is_InsideBar', 'is_Marubozu', 'ATR_Ratio'}
+            
+            missing_in_code = expected_features - provided_features
+            extra_in_code = provided_features - expected_features
+            
+            if missing_in_code:
+                st.error("### 🚨 抓到元凶了！特徵名稱不匹配！")
+                st.write("您的 `model.pkl` 訓練時使用的欄位名稱，與我們程式碼裡寫的不一樣。這導致所有資料在送進 AI 前被清空成 0，所以 AI 才會給出 12.5% 的極低盲猜勝率！")
+                st.write(f"**🔴 模型需要，但程式碼裡名稱不對的特徵：** `{list(missing_in_code)}`")
+                st.write(f"**🟡 程式碼有，但模型不需要的特徵：** `{list(extra_in_code)}`")
+                st.info("💡 **解法**：請看上方的紅字，找出大小寫或拼字不同的地方，然後修改 `app.py` 中約第 160 行的 `feature_dict` 字典，讓它的鍵值（Key）與紅字要求 **完全一模一樣**！")
+                st.stop()
 
         # 大盤資料
         market_return_20d = None
@@ -88,10 +111,8 @@ with tab1:
         except Exception: pass
 
         if use_market_filter and not market_bullish:
-            st.warning("⚠️ 大盤目前偏空（加權指數跌破5日均線），已觸發『大盤多頭過濾』。停止掃描以規避風險。")
+            st.warning("⚠️ 大盤目前偏空，已觸發『大盤多頭過濾』。")
             st.stop()
-        elif market_return_20d is not None:
-            st.caption(f"📊 大盤近20日報酬：{round(market_return_20d, 2)}%（{'偏多 🟢' if market_bullish else '偏空 🔴'}）")
 
         tickers_list = list(all_stocks.keys())
         temp_watchlist = []
@@ -100,7 +121,7 @@ with tab1:
             "1. yfinance 無資料或下載失敗": 0,
             "2. 有效交易日少於 125 天": 0,
             "3. KY 股排除": 0,
-            "4. 成交量少於 500 張": 0,
+            f"4. 成交量少於 {min_vol} 張": 0,
             "5. RVOL 未達標": 0,
             "6. RS 相對強度未達標": 0,
             "7. 特徵計算或 AI 預測異常": 0,
@@ -144,8 +165,8 @@ with tab1:
                     current_p = float(df['Close'].iloc[-1])
                     vol_today = float(df['Volume'].iloc[-1])
                     
-                    if (vol_today / 1000.0) < 500:
-                        death_toll["4. 成交量少於 500 張"] += 1
+                    if (vol_today / 1000.0) < min_vol:
+                        death_toll[f"4. 成交量少於 {min_vol} 張"] += 1
                         continue
                     
                     gap_pct = ((open_p - prev_close) / prev_close) * 100
@@ -156,7 +177,6 @@ with tab1:
                         death_toll["5. RVOL 未達標"] += 1
                         continue
                     
-                    # RS 計算
                     if len(df) >= 21 and market_return_20d is not None:
                         stock_return_20d = float((df['Close'].iloc[-1] / df['Close'].iloc[-20] - 1) * 100)
                         rs_score = stock_return_20d - market_return_20d
@@ -188,6 +208,7 @@ with tab1:
                     tr = pd.concat([df['High']-df['Low'], (df['High']-df['Close'].shift(1)).abs(), (df['Low']-df['Close'].shift(1)).abs()], axis=1).max(axis=1)
                     atr_14_val = float(tr.rolling(14).mean().iloc[-1])
                     
+                    # 💡 注意：如果您觸發了特徵名稱不符的錯誤，請修改下方字典的「單引號內文字」
                     feature_dict = {
                         'Gap_0_2': int(0 <= gap_pct < 2), 'Gap_2_4': int(2 <= gap_pct < 4),
                         'Gap_4_6': int(4 <= gap_pct < 6), 'Gap_6_9': int(6 <= gap_pct < 9), 'Gap_Over_9': int(gap_pct >= 9),
@@ -201,7 +222,6 @@ with tab1:
                         'ATR_Ratio': (atr_14_val / current_p) * 100
                     }
                     
-                    # 🚨 防禦機制：填補空值 + 強制對齊 AI 模型欄位順序
                     X_input = pd.DataFrame([feature_dict]).fillna(0)
                     if hasattr(ml_model, "feature_names_in_"):
                         X_input = X_input.reindex(columns=ml_model.feature_names_in_, fill_value=0)
@@ -234,7 +254,7 @@ with tab1:
         
         st.markdown("### 📊 【除錯報告】全市場 1700+ 檔篩選統計")
         st.json(death_toll)
-        st.info(f"💡 **AI 預測報吿**：本次掃描全市場最高預測勝率為 `{max_prob_found:.1f}%`。若無股票存活，可適度將『AI 預測勝率門檻』微調至 `{max_prob_found:.0f}%` 以下。")
+        st.info(f"💡 **AI 預測報吿**：本次掃描全市場最高預測勝率為 `{max_prob_found:.1f}%`。")
         
         st.success(f"✔️ 盤前選股完成！成功抓出 {len(temp_watchlist)} 檔高潛力觀察股。已自動同步至「步驟二」。")
         if temp_watchlist:
