@@ -31,9 +31,6 @@ def load_model():
 ml_model = load_model()
 if ml_model: 
     st.sidebar.success("🤖 AI 2.0 預測引擎：已連線")
-    if hasattr(ml_model, "feature_names_in_"):
-        with st.sidebar.expander("🛠️ 模型要求的特徵名稱 (Debug)"):
-            st.write(list(ml_model.feature_names_in_))
 else: 
     st.sidebar.error("⚠️ 找不到 model.pkl")
 
@@ -70,9 +67,9 @@ with tab1:
     st.info("💡 操作提示：請在「前一天晚上」或「開盤前 08:30」執行此步驟。AI 將使用收盤後的正確資料進行大範圍掃描。")
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1: min_win_prob = st.slider("🎯 AI 勝率門檻 (%)", 0, 90, 40, step=5)
-    with c2: min_atr_ratio = st.number_input("⚡ 最低日震幅 ATR (%)", min_value=1.0, value=2.5, step=0.5, help="當沖爆發力關鍵！小於2.5%會抓出金融、食品等牛皮股，建議設定 >= 2.5%")
+    with c2: min_atr_ratio = st.number_input("⚡ 最低日震幅 ATR (%)", min_value=1.0, value=2.0, step=0.5, help="過濾低波動金融/牛皮股")
     with c3: min_vol = st.number_input("📉 最低成交量(張)", value=1000, step=500)
-    with c4: min_rvol = st.number_input("🔥 昨日 RVOL", min_value=0.5, value=1.1, step=0.1)
+    with c4: min_rvol = st.number_input("🔥 昨日 RVOL", min_value=0.5, value=1.0, step=0.1)
     with c5: min_rs = st.number_input("💪 最低 RS (%)", value=-5.0, step=1.0)
 
     if st.button("🚀 啟動盤前 AI 大掃描 (1700+ 檔)"):
@@ -84,12 +81,11 @@ with tab1:
             "1. yfinance 無資料或下載失敗": 0,
             "2. 有效交易日少於 125 天": 0,
             "3. KY 股排除": 0,
-            f"4. 日震幅 ATR% 低於 {min_atr_ratio}% (殺光牛皮/金融股)": 0,
+            f"4. 日震幅 ATR% 低於 {min_atr_ratio}%": 0,
             f"5. 成交量少於 {min_vol} 張": 0,
             "6. RVOL 未達標": 0,
-            "7. RS 相對強度未達標": 0,
-            "8. 特徵計算或 AI 預測異常": 0,
-            "9. AI 勝率未達標": 0
+            "7. 特徵計算或 AI 預測異常": 0,
+            "8. AI 勝率未達標": 0
         }
         
         max_prob_found = 0.0
@@ -98,13 +94,13 @@ with tab1:
         st.markdown("### ⏳ AI 宏觀過濾中，請稍候...")
         progress_bar = st.progress(0)
         
-        chunk_size = 100
+        chunk_size = 50
         chunks = [tickers_list[i:i + chunk_size] for i in range(0, len(tickers_list), chunk_size)]
         processed = 0
         
         for chunk in chunks:
             try:
-                data = yf.download(chunk, period="1y", interval="1d", group_by='ticker', threads=True, progress=False)
+                data = yf.download(chunk, period="1y", interval="1d", group_by='ticker', threads=False, progress=False)
             except Exception:
                 death_toll["1. yfinance 無資料或下載失敗"] += len(chunk)
                 continue
@@ -130,13 +126,12 @@ with tab1:
                     current_p = float(df['Close'].iloc[-1])
                     vol_today = float(df['Volume'].iloc[-1])
                     
-                    # 🛑 計算 14 日 ATR% 震幅，強制擊殺低波動牛皮股！
                     tr = pd.concat([df['High']-df['Low'], (df['High']-df['Close'].shift(1)).abs(), (df['Low']-df['Close'].shift(1)).abs()], axis=1).max(axis=1)
                     atr_14_val = float(tr.rolling(14).mean().iloc[-2])
                     atr_ratio = (atr_14_val / prev_close) * 100
                     
                     if atr_ratio < min_atr_ratio:
-                        death_toll[f"4. 日震幅 ATR% 低於 {min_atr_ratio}% (殺光牛皮/金融股)"] += 1
+                        death_toll[f"4. 日震幅 ATR% 低於 {min_atr_ratio}%"] += 1
                         continue
                     
                     if (vol_today / 1000.0) < min_vol:
@@ -150,8 +145,6 @@ with tab1:
                     if rvol < min_rvol:
                         death_toll["6. RVOL 未達標"] += 1
                         continue
-                    
-                    rs_score = 0.0 # 預設 RS 基礎分數
                     
                     ema5 = float(df['Close'].ewm(span=5).mean().iloc[-2])
                     ema10 = float(df['Close'].ewm(span=10).mean().iloc[-2])
@@ -194,58 +187,45 @@ with tab1:
 
                     clean_symbol = ticker.replace(".TW", "").replace(".TWO", "")
                     scored_entry = {
-                        "選取": True, # 預設預先勾選
-                        "代號": clean_symbol,
-                        "名稱": stock_name,
-                        "AI勝率(%)": round(prob, 1),
-                        "昨日RVOL": round(rvol, 2),
-                        "日震幅ATR(%)": round(atr_ratio, 2),
-                        "建議停損": round(current_p - (1.2 * atr_14_val), 2),
-                        "建議停利": round(current_p + (2.5 * atr_14_val), 2)
+                        "symbol": clean_symbol,
+                        "name": stock_name,
+                        "prob": round(prob, 1),
+                        "rvol": round(rvol, 2),
+                        "atr": round(atr_ratio, 2),
+                        "sl": round(current_p - (1.2 * atr_14_val), 2),
+                        "tp": round(current_p + (2.5 * atr_14_val), 2)
                     }
                     all_scored.append(scored_entry)
                         
-                except Exception as err:
-                    death_toll["8. 特徵計算或 AI 預測異常"] += 1
+                except Exception:
+                    death_toll["7. 特徵計算或 AI 預測異常"] += 1
                     
             progress_bar.progress(processed / len(tickers_list))
             
         st.markdown("### 📊 【除錯報告】全市場 1700+ 檔篩選統計")
         st.json(death_toll)
 
-        # 排序並顯示可勾選表格
         if all_scored:
-            sorted_candidates = sorted(all_scored, key=lambda x: x["AI勝率(%)"], reverse=True)[:30]
-            st.markdown("### 🎯 請勾選欲同步至「09:10 微觀狙擊」的潛力名單：")
+            sorted_candidates = sorted(all_scored, key=lambda x: x["prob"], reverse=True)[:30]
+            st.markdown("### 🎯 請選擇欲同步至「09:10 微觀狙擊」的觀察名單：")
             
-            df_candidates = pd.DataFrame(sorted_candidates)
+            # 使用超級穩定的 st.multiselect，徹底避開前端 CSS 載入失敗問題
+            options_dict = {f"{item['symbol']} {item['name']} (AI勝率: {item['prob']}%, ATR: {item['atr']}%)": item for item in sorted_candidates}
             
-            # 使用 Streamlit 可勾選/編輯表格
-            edited_df = st.data_editor(
-                df_candidates,
-                column_config={
-                    "選取": st.column_config.CheckboxColumn("加入狙擊池", default=True)
-                },
-                disabled=["代號", "名稱", "AI勝率(%)", "昨日RVOL", "日震幅ATR(%)", "建議停損", "建議停利"],
-                hide_index=True,
-                use_container_width=True
+            selected_keys = st.multiselect(
+                "勾選標的（可隨時新增/刪除）：",
+                options=list(options_dict.keys()),
+                default=list(options_dict.keys())
             )
             
-            # 抽出被勾選的標的，更新到 Session State 供 Tab 2 使用
-            selected_rows = edited_df[edited_df["選取"] == True]
-            selected_watchlist = []
-            for _, row in selected_rows.iterrows():
-                selected_watchlist.append({
-                    "symbol": row["代號"],
-                    "name": row["名稱"],
-                    "prob": row["AI勝率(%)"],
-                    "rvol": row["昨日RVOL"],
-                    "sl": row["建議停損"],
-                    "tp": row["建議停利"]
-                })
-                
-            st.session_state.watchlist = selected_watchlist
-            st.success(f"✔️ 已成功同步 `{len(selected_watchlist)}` 檔勾選標的至「步驟二：09:10 當沖狙擊池」！")
+            st.session_state.watchlist = [options_dict[k] for k in selected_keys]
+            st.success(f"✔️ 已成功同步 `{len(st.session_state.watchlist)}` 檔選取標的至「步驟二：09:10 當沖狙擊池」！")
+            
+            # 預覽表格
+            if st.session_state.watchlist:
+                st.dataframe(pd.DataFrame(st.session_state.watchlist).rename(columns={
+                    "symbol": "代號", "name": "名稱", "prob": "AI勝率(%)", "rvol": "昨日RVOL", "atr": "日震幅ATR(%)", "sl": "建議停損", "tp": "建議停利"
+                }), use_container_width=True)
 
 # ------------------------------------------
 # Tab 2: 09:10 當沖狙擊 (Fugle 盤中資料)
@@ -254,9 +234,9 @@ with tab2:
     st.info("💡 操作提示：請在早上 09:10 分準時執行！系統將針對步驟一勾選的股票進行微觀籌碼與 VWAP 精確打擊。")
     
     if len(st.session_state.watchlist) == 0:
-        st.warning("⚠️ 目前觀察名單為空，請先至「步驟一」進行掃描並勾選標的。")
+        st.warning("⚠️ 目前觀察名單為空，請先至「步驟一」進行掃描並選擇標的。")
     else:
-        st.markdown(f"**目前鎖定手動勾選目標：** `{len(st.session_state.watchlist)}` 檔標的")
+        st.markdown(f"**目前鎖定目標：** `{len(st.session_state.watchlist)}` 檔標的")
         
         c2_1, c2_2 = st.columns(2)
         with c2_1: min_gap = st.number_input("🚀 今日跳空開高要求 (%)", min_value=0.0, value=1.0, step=0.5)
