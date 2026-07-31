@@ -63,13 +63,34 @@ tab1, tab2 = st.tabs(["🌙 步驟一：盤前 AI 選股 (無 API 限制)", "☀
 # ------------------------------------------
 with tab1:
     st.info("💡 操作提示：請在「前一天晚上」或「開盤前 08:30」執行此步驟。AI 將使用收盤後的正確資料進行大範圍掃描。")
-    c1, c2 = st.columns(2)
+    c1, c2, c3, c4 = st.columns(4)
     with c1: min_win_prob = st.slider("🎯 AI 預測勝率門檻 (%)", 40, 90, 50, step=5)
     with c2: min_rvol = st.number_input("🔥 昨日 RVOL 爆發動能", min_value=0.5, value=1.0, step=0.1)
-    
+    with c3: min_rs = st.number_input("💪 最低相對強度 RS (vs 大盤, %)", value=0.0, step=1.0, help="個股近20日報酬 減去 大盤(加權指數)近20日報酬。>0 代表跑贏大盤，屬於強勢股，符合『強者恆強』選股邏輯。")
+    with c4: use_market_filter = st.checkbox("🛡️ 大盤多頭過濾", value=True, help="加權指數需站上5日均線，才視為大盤偏多；大盤偏空時當沖做多勝率通常較低。")
+
     if st.button("🚀 啟動盤前 AI 大掃描 (1700+ 檔)"):
         if not ml_model: st.stop()
-        
+
+        # --- 大盤(加權指數)基準資料：用於相對強度 RS 與多空過濾 ---
+        market_return_20d = None
+        market_bullish = True
+        try:
+            twii = yf.download("^TWII", period="6mo", interval="1d", progress=False)
+            twii_close = twii['Close'].dropna()
+            if len(twii_close) >= 21:
+                market_return_20d = float((twii_close.iloc[-2] / twii_close.iloc[-21] - 1) * 100)
+                ma5 = float(twii_close.iloc[-6:-1].mean())
+                market_bullish = float(twii_close.iloc[-2]) > ma5
+        except Exception:
+            pass
+
+        if use_market_filter and not market_bullish:
+            st.warning("⚠️ 大盤目前偏空（加權指數跌破5日均線），已啟用『大盤多頭過濾』。此模式下當沖做多勝率通常較低，建議謹慎操作或暫停進場。")
+            st.stop()
+        elif market_return_20d is not None:
+            st.caption(f"📊 大盤近20日報酬：{round(market_return_20d, 2)}%（{'偏多 🟢' if market_bullish else '偏空 🔴'}），將作為個股相對強度 RS 的基準。")
+
         tickers_list = list(all_stocks.keys())
         temp_watchlist = []
         
@@ -106,6 +127,16 @@ with tab1:
                     rvol = vol_today / (vol_ma20 + 1e-5)
                     
                     if rvol < min_rvol: continue
+                    
+                    # --- 相對強度 RS (個股近20日報酬 - 大盤近20日報酬) ---
+                    # 注意：RS 僅作為「額外篩選/排序指標」，不餵入 ML 模型特徵，
+                    # 避免與 model.pkl 訓練時的特徵欄位不一致而導致預測錯誤。
+                    if len(df) >= 21 and market_return_20d is not None:
+                        stock_return_20d = float((df['Close'].iloc[-2] / df['Close'].iloc[-21] - 1) * 100)
+                        rs_score = stock_return_20d - market_return_20d
+                    else:
+                        rs_score = 0.0
+                    if rs_score < min_rs: continue
                     
                     ema5 = float(df['Close'].ewm(span=5).mean().iloc[-2])
                     ema10 = float(df['Close'].ewm(span=10).mean().iloc[-2])
@@ -151,17 +182,21 @@ with tab1:
                             "name": stock_name,
                             "prob": round(prob, 1),
                             "rvol": round(rvol, 2),
+                            "rs": round(rs_score, 2),
                             "sl": round(current_p - (1.2 * atr_14_val), 2),
                             "tp": round(current_p + (2.5 * atr_14_val), 2)
                         })
                 except Exception: pass
             progress_bar.progress(processed / len(tickers_list))
             
+        # 依相對強度 RS 排序（強者恆強：跑贏大盤越多的排越前面）
+        temp_watchlist = sorted(temp_watchlist, key=lambda x: x["rs"], reverse=True)
+
         # 將結果存入記憶體供 Tab 2 使用
         st.session_state.watchlist = temp_watchlist
         st.success(f"✔️ 盤前選股完成！成功抓出 {len(temp_watchlist)} 檔高潛力觀察股。已自動同步至「步驟二」。")
         if temp_watchlist:
-            st.dataframe(pd.DataFrame(temp_watchlist).rename(columns={"symbol": "代號", "name": "名稱", "prob": "AI勝率(%)", "rvol": "昨日RVOL", "sl": "建議停損", "tp": "建議停利"}), use_container_width=True)
+            st.dataframe(pd.DataFrame(temp_watchlist).rename(columns={"symbol": "代號", "name": "名稱", "prob": "AI勝率(%)", "rvol": "昨日RVOL", "rs": "相對強度RS(%)", "sl": "建議停損", "tp": "建議停利"}), use_container_width=True)
 
 
 # ------------------------------------------
@@ -178,6 +213,11 @@ with tab2:
         c2_1, c2_2 = st.columns(2)
         with c2_1: min_gap = st.number_input("🚀 今日跳空開高要求 (%)", min_value=0.0, value=1.0, step=0.5, help="主力盤前點火的證據")
         with c2_2: require_vwap = st.checkbox("☑️ 現價必須大於 09:10 VWAP (極嚴格)", value=True, help="這確保主力開盤沒有倒貨")
+
+        st.markdown("##### 💰 資金與風控設定（依 ATR 停損反推建議張數）")
+        c2_3, c2_4 = st.columns(2)
+        with c2_3: account_size = st.number_input("帳戶總資金 (TWD)", min_value=10000, value=500000, step=10000)
+        with c2_4: risk_pct = st.slider("單筆交易最大可承受虧損 (% of 總資金)", 0.5, 5.0, 1.0, step=0.5, help="職業當沖常見紀律：單筆虧損不超過總資金的1~2%，以此反推該買幾張。")
         
         if st.button("🎯 執行 09:10 終極狙擊 (連線 Fugle API)"):
             if not fugle_token:
@@ -223,6 +263,19 @@ with tab2:
                             stock["09:10 現價"] = current_p
                             stock["盤中 VWAP"] = round(vwap_price, 2)
                             stock["動能狀態"] = "🔥 主力點火中"
+
+                            # --- ATR 部位風控：單筆最大虧損不超過帳戶資金的 risk_pct% ---
+                            risk_budget = account_size * (risk_pct / 100.0)
+                            risk_per_share = current_p - stock["sl"]
+                            if risk_per_share > 0:
+                                max_shares = int(risk_budget / risk_per_share)
+                                suggested_lots = max_shares // 1000  # 台股一張=1000股，僅供整張參考
+                                actual_risk = suggested_lots * 1000 * risk_per_share
+                            else:
+                                suggested_lots, actual_risk = 0, 0
+                            stock["建議張數"] = suggested_lots
+                            stock["預估風險金額"] = round(actual_risk, 0)
+
                             final_targets.append(stock)
                             
                 except Exception as e: pass
@@ -235,12 +288,14 @@ with tab2:
                 st.success(f"🎉 狙擊完成！萬中選一，這 {len(final_targets)} 檔是今日勝率最高、符合您 09:30 停利目標的飆股！")
                 
                 df_final = pd.DataFrame(final_targets)
-                cols_order = ["symbol", "name", "prob", "今日跳空(%)", "09:10 現價", "盤中 VWAP", "動能狀態", "sl", "tp"]
+                cols_order = ["symbol", "name", "prob", "rs", "今日跳空(%)", "09:10 現價", "盤中 VWAP", "動能狀態", "sl", "tp", "建議張數", "預估風險金額"]
                 df_final = df_final[cols_order].rename(columns={
-                    "symbol": "代號", "name": "名稱", "prob": "AI 勝率", "sl": "破此價停損", "tp": "建議停利"
+                    "symbol": "代號", "name": "名稱", "prob": "AI 勝率", "rs": "相對強度RS(%)", "sl": "破此價停損", "tp": "建議停利"
                 })
                 st.dataframe(df_final, use_container_width=True)
-                
-                st.info("💡 **實戰下單建議**：請在 09:10~09:15 之間進場上列表格中的標的。若跌破『盤中 VWAP』請果斷停損，若快速衝高達標請嚴格停利 (09:30 沖銷)！")
+
+                total_risk = df_final["預估風險金額"].sum()
+                st.caption(f"📌 若上列標的『全部』進場，依目前風控設定，估計最大總風險金額約為 {total_risk:,.0f} 元（佔總資金 {round(total_risk/account_size*100, 2)}%）。實務上建議依信心程度篩選少數幾檔，而非全數進場。")
+                st.info("💡 **實戰下單建議**：請在 09:10~09:15 之間進場上列表格中的標的。若跌破『盤中 VWAP』請果斷停損，若快速衝高達標請嚴格停利 (09:30 沖銷)！『建議張數』係依 ATR 停損反推的風控參考值，非買賣建議，請自行評估流動性與委買賣掛單量。")
             else:
                 st.warning("⚠️ 抱歉，今天您的觀察名單中，沒有任何一檔股票撐過『跳空』與『VWAP』的嚴格審查。最好的交易就是今天不交易！")
