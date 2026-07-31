@@ -5,33 +5,25 @@ import numpy as np
 import joblib
 import os
 import requests
-import time
 import traceback
 from fugle_marketdata import RestClient
 
 st.set_page_config(page_title="AI 2.0 量化當沖系統", page_icon="⚡", layout="wide")
 st.title("⚡ AI 2.0 專業量化當沖儀表板 (AI x VWAP 雙劍合璧)")
 
-# --- 側邊欄：富果 API 設定 ---
+# --- 側邊欄 ---
 st.sidebar.header("🔑 機構級資料源設定")
 fugle_token = st.sidebar.text_input("NmY3MDM1NjYtNzNlNC00NWJiLWFiNjgtZTc1NWI0MDgwY2FjIGI2YjQ5N2QyLTBhMTctNDM3OC1hNGJiLWJkOTZmNGM4NTg5Nw==", type="password")
-if fugle_token:
-    st.sidebar.success("✅ Token 已輸入，VWAP 引擎待命中！")
-else:
-    st.sidebar.warning("⚠️ 請輸入 Token 以啟用 VWAP 與 Tick 級別過濾。")
+if fugle_token: st.sidebar.success("✅ Token 已輸入，VWAP 引擎待命中！")
 
-# --- 1. 載入 AI 模型 ---
 @st.cache_resource
 def load_model():
     return joblib.load("model.pkl") if os.path.exists("model.pkl") else None
 
 ml_model = load_model()
-if ml_model:
-    st.sidebar.success("🤖 AI 2.0 預測引擎：已連線")
-else:
-    st.sidebar.error("⚠️ 找不到 model.pkl，請先執行 train_model.py")
+if ml_model: st.sidebar.success("🤖 AI 2.0 預測引擎：已連線")
+else: st.sidebar.error("⚠️ 找不到 model.pkl")
 
-# --- 2. 抓取全台股清單 ---
 @st.cache_data(ttl=86400)
 def get_all_taiwan_stocks():
     stock_dict = {}
@@ -52,7 +44,6 @@ def get_all_taiwan_stocks():
 
 all_stocks = get_all_taiwan_stocks()
 
-# --- 3. UI 控制面板 ---
 st.subheader("⚙️ 第一階段：AI 宏觀濾網 (Macro Filters)")
 r1_1, r1_2, r1_3 = st.columns(3)
 with r1_1: scan_scope = st.radio("掃描範圍：", ["🔥 精選熱門當沖庫 (100檔)", "🚀 全台股大掃描 (1700+ 檔)"], horizontal=True)
@@ -66,55 +57,69 @@ with r2_2: require_ema = st.checkbox("📈 嚴格要求 EMA 多頭排列", value
 
 TOP100_CODES = ["2330.TW", "2317.TW", "2454.TW", "2308.TW", "2303.TW", "2382.TW", "2881.TW", "3260.TWO", "3231.TW", "2603.TW", "3711.TW", "3443.TW", "3035.TW"]
 
-# --- 4. 執行雙劍合璧掃描 ---
 if st.button("🚀 啟動 AI x VWAP 雙階段掃描"):
-    if not ml_model:
-        st.error("系統缺少 AI 模型 (model.pkl)，無法執行。")
-        st.stop()
-        
+    if not ml_model: st.stop()
     target_stocks = all_stocks if "全台股" in scan_scope else {k: all_stocks.get(k, k) for k in TOP100_CODES if k in all_stocks}
     tickers_list = list(target_stocks.keys())
     
     stage1_passed = []
-    error_shown = False # 確保錯誤訊息只跳出一次，不會洗版
+    
+    # 🔍 新增：死因統計計數器
+    death_toll = {
+        "1. Yahoo無資料或K線少於125天": 0,
+        "2. KY股排除": 0,
+        "3. 今日成交量小於500張": 0,
+        "4. RVOL 未達爆量門檻": 0,
+        "5. EMA 空頭排列 (若有勾選)": 0,
+        "6. AI 預測勝率未達門檻": 0,
+        "7. 程式運算發生未知錯誤": 0
+    }
     
     st.markdown("### ⏳ 第一階段：全市場大數據 AI 過濾中...")
     progress_bar = st.progress(0)
-    status_text = st.empty()
     
     chunk_size = 100
     chunks = [tickers_list[i:i + chunk_size] for i in range(0, len(tickers_list), chunk_size)]
     processed_count = 0
     
     for chunk_idx, chunk_tickers in enumerate(chunks):
-        status_text.text(f"計算日K特徵矩陣 (第 {chunk_idx + 1} / {len(chunks)} 批次)...")
-        # ⚠️ 將抓取期間改為 1y，確保 120 日均線等長期指標不會變成 NaN
         data = yf.download(chunk_tickers, period="1y", interval="1d", group_by='ticker', threads=True, progress=False)
-        
         for ticker in chunk_tickers:
             processed_count += 1
             try:
                 df_stock = data[ticker] if len(chunk_tickers) > 1 else data
                 df = df_stock.dropna(subset=['Open', 'High', 'Low', 'Close', 'Volume'])
-                if len(df) < 125: continue # 確保資料量足以計算 120MA
                 
+                # 死因 1
+                if len(df) < 125: 
+                    death_toll["1. Yahoo無資料或K線少於125天"] += 1
+                    continue 
+                
+                # 死因 2
                 stock_name = target_stocks.get(ticker, "未知")
-                if "KY" in stock_name or "KY" in ticker: continue
+                if "KY" in stock_name or "KY" in ticker:
+                    death_toll["2. KY股排除"] += 1
+                    continue
                 
+                # 死因 3 (Yahoo 經常在盤中回傳 Volume 為 0)
                 vol_today_lots = float(df['Volume'].iloc[-1]) / 1000.0
-                if vol_today_lots < 500: continue # 放寬基本成交量過濾至 500 張
+                if vol_today_lots < 500:
+                    death_toll["3. 今日成交量小於500張"] += 1
+                    continue
                 
                 open_p = float(df['Open'].iloc[-1])
                 prev_close = float(df['Close'].iloc[-2])
                 current_p = float(df['Close'].iloc[-1])
                 vol_today = float(df['Volume'].iloc[-1])
                 
-                # 特徵計算
                 gap_pct = ((open_p - prev_close) / prev_close) * 100
                 vol_ma20 = float(df['Volume'].iloc[-21:-1].mean())
                 rvol = vol_today / (vol_ma20 + 1e-5)
                 
-                if rvol < min_rvol: continue
+                # 死因 4
+                if rvol < min_rvol:
+                    death_toll["4. RVOL 未達爆量門檻"] += 1
+                    continue
                 
                 ema5 = float(df['Close'].ewm(span=5).mean().iloc[-2])
                 ema10 = float(df['Close'].ewm(span=10).mean().iloc[-2])
@@ -122,7 +127,10 @@ if st.button("🚀 啟動 AI x VWAP 雙階段掃描"):
                 ema60 = float(df['Close'].ewm(span=60).mean().iloc[-2])
                 ema_bull = int(ema5 > ema10 and ema10 > ema20 and ema20 > ema60)
                 
-                if require_ema and not ema_bull: continue
+                # 死因 5
+                if require_ema and not ema_bull:
+                    death_toll["5. EMA 空頭排列 (若有勾選)"] += 1
+                    continue
                 
                 delta = df['Close'].diff()
                 gain = (delta.where(delta > 0, 0)).rolling(14).mean().iloc[-2]
@@ -155,6 +163,7 @@ if st.button("🚀 啟動 AI x VWAP 雙階段掃描"):
                 X_input = pd.DataFrame([feature_dict])
                 prob = ml_model.predict_proba(X_input)[0][1] * 100
                 
+                # 死因 6
                 if prob >= min_win_prob:
                     stage1_passed.append({
                         "symbol": ticker.replace(".TW", "").replace(".TWO", ""),
@@ -162,18 +171,20 @@ if st.button("🚀 啟動 AI x VWAP 雙階段掃描"):
                         "prob": prob, "rvol": rvol, "current_p": current_p,
                         "sl": round(open_p - (1.2 * atr_14_val), 2), "tp": round(open_p + (2.5 * atr_14_val), 2)
                     })
+                else:
+                    death_toll["6. AI 預測勝率未達門檻"] += 1
+                    
             except Exception as e:
-                # 🚨 關鍵除錯機制：如果出錯，會在這裡攔截並顯示在儀表板上！
-                if not error_shown:
-                    st.error(f"🚨 抓蟲警報！這就是導致結果為 0 檔的隱藏錯誤 (發生於 {ticker})：")
-                    st.code(traceback.format_exc())
-                    error_shown = True # 只顯示第一個錯誤，避免畫面崩潰
+                death_toll["7. 程式運算發生未知錯誤"] += 1
                 
         progress_bar.progress(processed_count / len(tickers_list))
     
-    st.success(f"✔️ 第一階段完成！過濾出 {len(stage1_passed)} 檔具備爆發動能的標的。")
+    # --- 顯示死因統計表 ---
+    st.markdown("### 📊 【除錯報告】1700檔股票淘汰原因統計")
+    st.json(death_toll)
     
-    # --- 下方的富果 VWAP 掃描邏輯維持不變 ---
+    st.success(f"✔️ 第一階段完成！最後存活： {len(stage1_passed)} 檔標的。")
+    
     if len(stage1_passed) > 0:
         if not fugle_token:
             st.warning("⚠️ 未輸入 Fugle Token，跳過第二階段 VWAP 審核。")
