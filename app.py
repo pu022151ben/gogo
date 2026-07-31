@@ -15,11 +15,11 @@ st.markdown("### 🏆 華爾街級戰略：T-1 日大數據選股 ➔ 09:10 微�
 
 # --- 側邊欄：富果 API 設定 ---
 st.sidebar.header("🔑 機構級資料源設定")
-fugle_token = st.sidebar.text_input("NmY3MDM1NjYtNzNlNC00NWJiLWFiNjgtZTc1NWI0MDgwY2FjIGI2YjQ5N2QyLTBhMTctNDM3OC1hNGJiLWJkOTZmNGM4NTg5Nw==", type="password")
+fugle_token = st.sidebar.text_input("請輸入富果 (Fugle) API Token", type="password")
 if fugle_token: 
     st.sidebar.success("✅ 富果 Token 已就緒，狙擊引擎待命中！")
 
-# 初始化 Session State 來記憶「盤前選股名單」
+# 初始化 Session State
 if "watchlist" not in st.session_state:
     st.session_state.watchlist = []
 
@@ -64,21 +64,22 @@ tab1, tab2 = st.tabs(["🌙 步驟一：盤前 AI 選股 (無 API 限制)", "☀
 with tab1:
     st.info("💡 操作提示：請在「前一天晚上」或「開盤前 08:30」執行此步驟。AI 將使用收盤後的正確資料進行大範圍掃描。")
     c1, c2, c3, c4 = st.columns(4)
-    with c1: min_win_prob = st.slider("🎯 AI 預測勝率門檻 (%)", 40, 90, 50, step=5)
+    with c1: min_win_prob = st.slider("🎯 AI 預測勝率門檻 (%)", 30, 90, 45, step=5)
     with c2: min_rvol = st.number_input("🔥 昨日 RVOL 爆發動能", min_value=0.5, value=1.0, step=0.1)
-    with c3: min_rs = st.number_input("💪 最低相對強度 RS (vs 大盤, %)", value=0.0, step=1.0, help="個股近20日報酬 減去 大盤近20日報酬。")
-    with c4: use_market_filter = st.checkbox("🛡️ 大盤多頭過濾", value=True, help="加權指數需站上5日均線。")
+    with c3: min_rs = st.number_input("💪 最低相對強度 RS (vs 大盤, %)", value=-5.0, step=1.0, help="個股近20日報酬 減去 大盤近20日報酬。")
+    with c4: use_market_filter = st.checkbox("🛡️ 大盤多頭過濾", value=False, help="加權指數需站上5日均線。")
 
     if st.button("🚀 啟動盤前 AI 大掃描 (1700+ 檔)"):
         if not ml_model: st.stop()
 
-        # --- 大盤(加權指數)基準資料 ---
+        # 大盤資料
         market_return_20d = None
         market_bullish = True
         try:
             twii = yf.download("^TWII", period="6mo", interval="1d", progress=False)
             twii_df = twii.dropna(subset=['Close'])
-            twii_df = twii_df[twii_df['Volume'] > 0] if 'Volume' in twii_df.columns else twii_df
+            if 'Volume' in twii_df.columns:
+                twii_df = twii_df[twii_df['Volume'] > 0]
             twii_close = twii_df['Close']
             if len(twii_close) >= 21:
                 market_return_20d = float((twii_close.iloc[-1] / twii_close.iloc[-20] - 1) * 100)
@@ -95,6 +96,19 @@ with tab1:
         tickers_list = list(all_stocks.keys())
         temp_watchlist = []
         
+        death_toll = {
+            "1. yfinance 無資料或下載失敗": 0,
+            "2. 有效交易日少於 125 天": 0,
+            "3. KY 股排除": 0,
+            "4. 成交量少於 500 張": 0,
+            "5. RVOL 未達標": 0,
+            "6. RS 相對強度未達標": 0,
+            "7. 特徵計算或 AI 預測異常": 0,
+            "8. AI 勝率未達標": 0
+        }
+        
+        max_prob_found = 0.0
+        
         st.markdown("### ⏳ AI 宏觀過濾中，請稍候...")
         progress_bar = st.progress(0)
         
@@ -103,43 +117,55 @@ with tab1:
         processed = 0
         
         for chunk in chunks:
-            data = yf.download(chunk, period="1y", interval="1d", group_by='ticker', threads=True, progress=False)
+            try:
+                data = yf.download(chunk, period="1y", interval="1d", group_by='ticker', threads=True, progress=False)
+            except Exception:
+                death_toll["1. yfinance 無資料或下載失敗"] += len(chunk)
+                continue
+                
             for ticker in chunk:
                 processed += 1
                 try:
                     df_stock = data[ticker] if len(chunk) > 1 else data
-                    
-                    # 🚨 關鍵修復：過濾掉 Volume <= 0 或 NaN 的無效列！
                     df = df_stock.dropna(subset=['Open', 'High', 'Low', 'Close', 'Volume'])
-                    df = df[df['Volume'] > 0] 
+                    df = df[df['Volume'] > 0]
                     
-                    if len(df) < 125: continue # 確保有足夠的有效交易日
+                    if len(df) < 125:
+                        death_toll["2. 有效交易日少於 125 天"] += 1
+                        continue
                     
                     stock_name = all_stocks.get(ticker, "未知")
-                    if "KY" in stock_name or "KY" in ticker: continue
+                    if "KY" in stock_name or "KY" in ticker:
+                        death_toll["3. KY 股排除"] += 1
+                        continue
                     
-                    # 經過過濾後，iloc[-1] 必定是最後一個「成交量 > 0」的完整交易日！
                     open_p = float(df['Open'].iloc[-1])
                     prev_close = float(df['Close'].iloc[-2])
                     current_p = float(df['Close'].iloc[-1])
                     vol_today = float(df['Volume'].iloc[-1])
                     
-                    if (vol_today / 1000.0) < 500: continue # 剔除日均量過低的死魚股
+                    if (vol_today / 1000.0) < 500:
+                        death_toll["4. 成交量少於 500 張"] += 1
+                        continue
                     
                     gap_pct = ((open_p - prev_close) / prev_close) * 100
                     vol_ma20 = float(df['Volume'].iloc[-21:-1].mean())
                     rvol = vol_today / (vol_ma20 + 1e-5)
                     
-                    if rvol < min_rvol: continue
+                    if rvol < min_rvol:
+                        death_toll["5. RVOL 未達標"] += 1
+                        continue
                     
-                    # 相對強度 RS 計算
+                    # RS 計算
                     if len(df) >= 21 and market_return_20d is not None:
                         stock_return_20d = float((df['Close'].iloc[-1] / df['Close'].iloc[-20] - 1) * 100)
                         rs_score = stock_return_20d - market_return_20d
                     else:
                         rs_score = 0.0
                         
-                    if rs_score < min_rs: continue
+                    if rs_score < min_rs:
+                        death_toll["6. RS 相對強度未達標"] += 1
+                        continue
                     
                     ema5 = float(df['Close'].ewm(span=5).mean().iloc[-1])
                     ema10 = float(df['Close'].ewm(span=10).mean().iloc[-1])
@@ -175,9 +201,15 @@ with tab1:
                         'ATR_Ratio': (atr_14_val / current_p) * 100
                     }
                     
-                    X_input = pd.DataFrame([feature_dict])
-                    prob = ml_model.predict_proba(X_input)[0][1] * 100
+                    # 🚨 防禦機制：填補空值 + 強制對齊 AI 模型欄位順序
+                    X_input = pd.DataFrame([feature_dict]).fillna(0)
+                    if hasattr(ml_model, "feature_names_in_"):
+                        X_input = X_input.reindex(columns=ml_model.feature_names_in_, fill_value=0)
                     
+                    prob = float(ml_model.predict_proba(X_input)[0][1] * 100)
+                    if prob > max_prob_found:
+                        max_prob_found = prob
+                        
                     if prob >= min_win_prob:
                         clean_symbol = ticker.replace(".TW", "").replace(".TWO", "")
                         temp_watchlist.append({
@@ -189,11 +221,21 @@ with tab1:
                             "sl": round(current_p - (1.2 * atr_14_val), 2),
                             "tp": round(current_p + (2.5 * atr_14_val), 2)
                         })
-                except Exception: pass
+                    else:
+                        death_toll["8. AI 勝率未達標"] += 1
+                        
+                except Exception as err:
+                    death_toll["7. 特徵計算或 AI 預測異常"] += 1
+                    
             progress_bar.progress(processed / len(tickers_list))
             
         temp_watchlist = sorted(temp_watchlist, key=lambda x: x["rs"], reverse=True)
         st.session_state.watchlist = temp_watchlist
+        
+        st.markdown("### 📊 【除錯報告】全市場 1700+ 檔篩選統計")
+        st.json(death_toll)
+        st.info(f"💡 **AI 預測報吿**：本次掃描全市場最高預測勝率為 `{max_prob_found:.1f}%`。若無股票存活，可適度將『AI 預測勝率門檻』微調至 `{max_prob_found:.0f}%` 以下。")
+        
         st.success(f"✔️ 盤前選股完成！成功抓出 {len(temp_watchlist)} 檔高潛力觀察股。已自動同步至「步驟二」。")
         if temp_watchlist:
             st.dataframe(pd.DataFrame(temp_watchlist).rename(columns={"symbol": "代號", "name": "名稱", "prob": "AI勝率(%)", "rvol": "昨日RVOL", "rs": "相對強度RS(%)", "sl": "建議停損", "tp": "建議停利"}), use_container_width=True)
