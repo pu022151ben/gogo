@@ -5,7 +5,6 @@ import numpy as np
 import joblib
 import os
 import requests
-import traceback
 from fugle_marketdata import RestClient
 
 st.set_page_config(page_title="AI 2.0 量化當沖系統", page_icon="⚡", layout="wide")
@@ -13,7 +12,7 @@ st.title("⚡ AI 2.0 專業量化當沖儀表板 (AI x VWAP 雙劍合璧)")
 
 # --- 側邊欄 ---
 st.sidebar.header("🔑 機構級資料源設定")
-fugle_token = st.sidebar.text_input("NmY3MDM1NjYtNzNlNC00NWJiLWFiNjgtZTc1NWI0MDgwY2FjIGI2YjQ5N2QyLTBhMTctNDM3OC1hNGJiLWJkOTZmNGM4NTg5Nw==", type="password")
+fugle_token = st.sidebar.text_input("請輸入富果 (Fugle) API Token", type="password")
 if fugle_token: st.sidebar.success("✅ Token 已輸入，VWAP 引擎待命中！")
 
 @st.cache_resource
@@ -64,12 +63,11 @@ if st.button("🚀 啟動 AI x VWAP 雙階段掃描"):
     
     stage1_passed = []
     
-    # 🔍 新增：死因統計計數器
     death_toll = {
         "1. Yahoo無資料或K線少於125天": 0,
         "2. KY股排除": 0,
-        "3. 今日成交量小於500張": 0,
-        "4. RVOL 未達爆量門檻": 0,
+        "3. 今日成交量小於500張 (已解除淘汰)": 0,
+        "4. RVOL 未達爆量門檻 (已解除淘汰)": 0,
         "5. EMA 空頭排列 (若有勾選)": 0,
         "6. AI 預測勝率未達門檻": 0,
         "7. 程式運算發生未知錯誤": 0
@@ -90,22 +88,20 @@ if st.button("🚀 啟動 AI x VWAP 雙階段掃描"):
                 df_stock = data[ticker] if len(chunk_tickers) > 1 else data
                 df = df_stock.dropna(subset=['Open', 'High', 'Low', 'Close', 'Volume'])
                 
-                # 死因 1
                 if len(df) < 125: 
                     death_toll["1. Yahoo無資料或K線少於125天"] += 1
                     continue 
                 
-                # 死因 2
                 stock_name = target_stocks.get(ticker, "未知")
                 if "KY" in stock_name or "KY" in ticker:
                     death_toll["2. KY股排除"] += 1
                     continue
                 
-                # 死因 3 (Yahoo 經常在盤中回傳 Volume 為 0)
+                # 🛑 死因 3：暫時解除封印
                 vol_today_lots = float(df['Volume'].iloc[-1]) / 1000.0
                 if vol_today_lots < 500:
-                    death_toll["3. 今日成交量小於500張"] += 1
-                    continue
+                    death_toll["3. 今日成交量小於500張 (已解除淘汰)"] += 1
+                    # continue  <-- 將淘汰指令註解掉，直接放行！
                 
                 open_p = float(df['Open'].iloc[-1])
                 prev_close = float(df['Close'].iloc[-2])
@@ -116,10 +112,10 @@ if st.button("🚀 啟動 AI x VWAP 雙階段掃描"):
                 vol_ma20 = float(df['Volume'].iloc[-21:-1].mean())
                 rvol = vol_today / (vol_ma20 + 1e-5)
                 
-                # 死因 4
+                # 🛑 死因 4：暫時解除封印
                 if rvol < min_rvol:
-                    death_toll["4. RVOL 未達爆量門檻"] += 1
-                    continue
+                    death_toll["4. RVOL 未達爆量門檻 (已解除淘汰)"] += 1
+                    # continue  <-- 將淘汰指令註解掉，直接放行！
                 
                 ema5 = float(df['Close'].ewm(span=5).mean().iloc[-2])
                 ema10 = float(df['Close'].ewm(span=10).mean().iloc[-2])
@@ -127,7 +123,6 @@ if st.button("🚀 啟動 AI x VWAP 雙階段掃描"):
                 ema60 = float(df['Close'].ewm(span=60).mean().iloc[-2])
                 ema_bull = int(ema5 > ema10 and ema10 > ema20 and ema20 > ema60)
                 
-                # 死因 5
                 if require_ema and not ema_bull:
                     death_toll["5. EMA 空頭排列 (若有勾選)"] += 1
                     continue
@@ -163,7 +158,6 @@ if st.button("🚀 啟動 AI x VWAP 雙階段掃描"):
                 X_input = pd.DataFrame([feature_dict])
                 prob = ml_model.predict_proba(X_input)[0][1] * 100
                 
-                # 死因 6
                 if prob >= min_win_prob:
                     stage1_passed.append({
                         "symbol": ticker.replace(".TW", "").replace(".TWO", ""),
@@ -179,7 +173,6 @@ if st.button("🚀 啟動 AI x VWAP 雙階段掃描"):
                 
         progress_bar.progress(processed_count / len(tickers_list))
     
-    # --- 顯示死因統計表 ---
     st.markdown("### 📊 【除錯報告】1700檔股票淘汰原因統計")
     st.json(death_toll)
     
@@ -213,4 +206,9 @@ if st.button("🚀 啟動 AI x VWAP 雙階段掃描"):
                 "symbol": "代號", "name": "股票名稱", "prob": "AI 勝率 (%)", "rvol": "RVOL (倍)", "current_p": "最新價", "sl": "停損(1.2ATR)", "tp": "停利(2.5ATR)"
             })
             display_df = display_df.sort_values(by="AI 勝率 (%)", ascending=False)
+            
+            # 格式化數值
+            display_df["AI 勝率 (%)"] = display_df["AI 勝率 (%)"].apply(lambda x: f"{x:.1f}%")
+            display_df["RVOL (倍)"] = display_df["RVOL (倍)"].apply(lambda x: f"{x:.2f}")
+            
             st.dataframe(display_df, use_container_width=True)
