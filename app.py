@@ -6,6 +6,7 @@ import joblib
 import os
 import requests
 import time
+import gc
 from datetime import datetime
 from fugle_marketdata import RestClient
 
@@ -55,6 +56,14 @@ def get_all_taiwan_stocks():
 
 all_stocks = get_all_taiwan_stocks()
 
+# 精選熱門當沖庫代碼 (預防全台股 API Rate Limit 時的備用高效庫)
+TOP_DAYTRADE_CODES = [
+    "2330.TW", "2317.TW", "2454.TW", "2308.TW", "2303.TW", "2382.TW", "3231.TW", "2603.TW",
+    "3711.TW", "3443.TW", "3035.TW", "2379.TW", "3661.TW", "6669.TW", "1519.TW", "1504.TW",
+    "1513.TW", "1514.TW", "2368.TW", "3017.TW", "3324.TWO", "3583.TW", "6274.TWO", "8096.TWO",
+    "3260.TWO", "6187.TWO", "8054.TWO", "3037.TW", "2356.TW", "2408.TW", "2609.TW", "2618.TW"
+]
+
 # ==========================================
 # 介面分頁
 # ==========================================
@@ -65,6 +74,9 @@ tab1, tab2 = st.tabs(["🌙 步驟一：盤前 AI 選股 (無 API 限制)", "☀
 # ------------------------------------------
 with tab1:
     st.info("💡 操作提示：請在「前一天晚上」或「開盤前 08:30」執行此步驟。AI 將使用收盤後的正確資料進行大範圍掃描。")
+    
+    scan_scope = st.radio("🔍 選擇掃描目標範圍：", ["🔥 精選熱門高流動性當沖庫 (~200檔，穩定防爆)", "🚀 全台股大掃描 (1700+檔，耗時較長)"], horizontal=True)
+    
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1: min_win_prob = st.slider("🎯 AI 勝率門檻 (%)", 0, 90, 40, step=5)
     with c2: min_atr_ratio = st.number_input("⚡ 最低日震幅 ATR (%)", min_value=1.0, value=2.0, step=0.5, help="過濾低波動金融/牛皮股")
@@ -72,10 +84,18 @@ with tab1:
     with c4: min_rvol = st.number_input("🔥 昨日 RVOL", min_value=0.5, value=1.0, step=0.1)
     with c5: min_rs = st.number_input("💪 最低 RS (%)", value=-5.0, step=1.0)
 
-    if st.button("🚀 啟動盤前 AI 大掃描 (1700+ 檔)"):
+    if st.button("🚀 啟動盤前 AI 大掃描"):
         if not ml_model: st.stop()
 
-        tickers_list = list(all_stocks.keys())
+        # 根據選擇設定目標標的
+        if "精選" in scan_scope:
+            target_stocks = {k: all_stocks.get(k, k) for k in TOP_DAYTRADE_CODES if k in all_stocks}
+            if not target_stocks:
+                target_stocks = {k: k for k in TOP_DAYTRADE_CODES}
+        else:
+            target_stocks = all_stocks
+
+        tickers_list = list(target_stocks.keys())
         
         death_toll = {
             "1. yfinance 無資料或下載失敗": 0,
@@ -94,138 +114,143 @@ with tab1:
         st.markdown("### ⏳ AI 宏觀過濾中，請稍候...")
         progress_bar = st.progress(0)
         
-        chunk_size = 50
+        chunk_size = 40
         chunks = [tickers_list[i:i + chunk_size] for i in range(0, len(tickers_list), chunk_size)]
         processed = 0
         
-        for chunk in chunks:
-            try:
-                data = yf.download(chunk, period="1y", interval="1d", group_by='ticker', threads=False, progress=False)
-            except Exception:
-                death_toll["1. yfinance 無資料或下載失敗"] += len(chunk)
-                continue
-                
-            for ticker in chunk:
-                processed += 1
+        # 🚨 頂層防爆機制：防止整支 App 崩潰
+        try:
+            for chunk in chunks:
                 try:
-                    df_stock = data[ticker] if len(chunk) > 1 else data
-                    df = df_stock.dropna(subset=['Open', 'High', 'Low', 'Close', 'Volume'])
-                    df = df[df['Volume'] > 0]
-                    
-                    if len(df) < 125:
-                        death_toll["2. 有效交易日少於 125 天"] += 1
-                        continue
-                    
-                    stock_name = all_stocks.get(ticker, "未知")
-                    if "KY" in stock_name or "KY" in ticker:
-                        death_toll["3. KY 股排除"] += 1
-                        continue
-                    
-                    open_p = float(df['Open'].iloc[-1])
-                    prev_close = float(df['Close'].iloc[-2])
-                    current_p = float(df['Close'].iloc[-1])
-                    vol_today = float(df['Volume'].iloc[-1])
-                    
-                    tr = pd.concat([df['High']-df['Low'], (df['High']-df['Close'].shift(1)).abs(), (df['Low']-df['Close'].shift(1)).abs()], axis=1).max(axis=1)
-                    atr_14_val = float(tr.rolling(14).mean().iloc[-2])
-                    atr_ratio = (atr_14_val / prev_close) * 100
-                    
-                    if atr_ratio < min_atr_ratio:
-                        death_toll[f"4. 日震幅 ATR% 低於 {min_atr_ratio}%"] += 1
-                        continue
-                    
-                    if (vol_today / 1000.0) < min_vol:
-                        death_toll[f"5. 成交量少於 {min_vol} 張"] += 1
-                        continue
-                    
-                    gap_pct = ((open_p - prev_close) / prev_close) * 100
-                    vol_ma20 = float(df['Volume'].iloc[-21:-1].mean())
-                    rvol = vol_today / (vol_ma20 + 1e-5)
-                    
-                    if rvol < min_rvol:
-                        death_toll["6. RVOL 未達標"] += 1
-                        continue
-                    
-                    ema5 = float(df['Close'].ewm(span=5).mean().iloc[-2])
-                    ema10 = float(df['Close'].ewm(span=10).mean().iloc[-2])
-                    ema20 = float(df['Close'].ewm(span=20).mean().iloc[-2])
-                    ema60 = float(df['Close'].ewm(span=60).mean().iloc[-2])
-                    ema_bull = int(ema5 > ema10 and ema10 > ema20 and ema20 > ema60)
-                    
-                    delta = df['Close'].diff()
-                    gain = (delta.where(delta > 0, 0)).rolling(14).mean().iloc[-2]
-                    loss = (-delta.where(delta < 0, 0)).rolling(14).mean().iloc[-2]
-                    rsi = 100 - (100 / (1 + (gain / (loss + 1e-5))))
-                    
-                    macd_line = df['Close'].ewm(span=12).mean() - df['Close'].ewm(span=26).mean()
-                    macd_sig = macd_line.ewm(span=9).mean()
-                    macd_hist = float((macd_line - macd_sig).iloc[-2])
-                    
-                    sma20 = float(df['Close'].rolling(20).mean().iloc[-2])
-                    std20 = float(df['Close'].rolling(20).std().iloc[-2])
-                    
-                    feature_dict = {
-                        'Gap_0_2': int(0 <= gap_pct < 2), 'Gap_2_4': int(2 <= gap_pct < 4),
-                        'Gap_4_6': int(4 <= gap_pct < 6), 'Gap_6_9': int(6 <= gap_pct < 9), 'Gap_Over_9': int(gap_pct >= 9),
-                        'RVOL': rvol, 'EMA_Bullish': ema_bull, 'RSI_14': rsi, 'RSI_GoldenZone': int(55 < rsi < 75),
-                        'MACD_Hist_Pos': int(macd_hist > 0), 'Close_Above_BB': int(prev_close > sma20 + 2 * std20),
-                        'High_20D': int(prev_close > float(df['High'].rolling(20).max().iloc[-3])),
-                        'High_55D': int(prev_close > float(df['High'].rolling(55).max().iloc[-3])),
-                        'High_120D': int(prev_close > float(df['High'].rolling(120).max().iloc[-3])),
-                        'is_InsideBar': int((df['High'].iloc[-2] < df['High'].iloc[-3]) and (df['Low'].iloc[-2] > df['Low'].iloc[-3])),
-                        'is_Marubozu': int((abs(prev_close - float(df['Open'].iloc[-2])) / ((df['High'].iloc[-2] - df['Low'].iloc[-2]) + 1e-5)) > 0.8),
-                        'ATR_Ratio': atr_ratio
-                    }
-                    
-                    X_input = pd.DataFrame([feature_dict]).fillna(0)
-                    if hasattr(ml_model, "feature_names_in_"):
-                        X_input = X_input.reindex(columns=ml_model.feature_names_in_, fill_value=0)
-                    
-                    prob = float(ml_model.predict_proba(X_input)[0][1] * 100)
-                    if prob > max_prob_found:
-                        max_prob_found = prob
-
-                    clean_symbol = ticker.replace(".TW", "").replace(".TWO", "")
-                    scored_entry = {
-                        "symbol": clean_symbol,
-                        "name": stock_name,
-                        "prob": round(prob, 1),
-                        "rvol": round(rvol, 2),
-                        "atr": round(atr_ratio, 2),
-                        "sl": round(current_p - (1.2 * atr_14_val), 2),
-                        "tp": round(current_p + (2.5 * atr_14_val), 2)
-                    }
-                    all_scored.append(scored_entry)
-                        
+                    data = yf.download(chunk, period="1y", interval="1d", group_by='ticker', threads=True, progress=False)
                 except Exception:
-                    death_toll["7. 特徵計算或 AI 預測異常"] += 1
+                    death_toll["1. yfinance 無資料或下載失敗"] += len(chunk)
+                    continue
                     
-            progress_bar.progress(processed / len(tickers_list))
-            
-        st.markdown("### 📊 【除錯報告】全市場 1700+ 檔篩選統計")
-        st.json(death_toll)
+                for ticker in chunk:
+                    processed += 1
+                    try:
+                        df_stock = data[ticker] if len(chunk) > 1 else data
+                        df = df_stock.dropna(subset=['Open', 'High', 'Low', 'Close', 'Volume'])
+                        df = df[df['Volume'] > 0]
+                        
+                        if len(df) < 125:
+                            death_toll["2. 有效交易日少於 125 天"] += 1
+                            continue
+                        
+                        stock_name = target_stocks.get(ticker, "未知")
+                        if "KY" in stock_name or "KY" in ticker:
+                            death_toll["3. KY 股排除"] += 1
+                            continue
+                        
+                        open_p = float(df['Open'].iloc[-1])
+                        prev_close = float(df['Close'].iloc[-2])
+                        current_p = float(df['Close'].iloc[-1])
+                        vol_today = float(df['Volume'].iloc[-1])
+                        
+                        tr = pd.concat([df['High']-df['Low'], (df['High']-df['Close'].shift(1)).abs(), (df['Low']-df['Close'].shift(1)).abs()], axis=1).max(axis=1)
+                        atr_14_val = float(tr.rolling(14).mean().iloc[-2])
+                        atr_ratio = (atr_14_val / prev_close) * 100
+                        
+                        if atr_ratio < min_atr_ratio:
+                            death_toll[f"4. 日震幅 ATR% 低於 {min_atr_ratio}%"] += 1
+                            continue
+                        
+                        if (vol_today / 1000.0) < min_vol:
+                            death_toll[f"5. 成交量少於 {min_vol} 張"] += 1
+                            continue
+                        
+                        gap_pct = ((open_p - prev_close) / prev_close) * 100
+                        vol_ma20 = float(df['Volume'].iloc[-21:-1].mean())
+                        rvol = vol_today / (vol_ma20 + 1e-5)
+                        
+                        if rvol < min_rvol:
+                            death_toll["6. RVOL 未達標"] += 1
+                            continue
+                        
+                        ema5 = float(df['Close'].ewm(span=5).mean().iloc[-2])
+                        ema10 = float(df['Close'].ewm(span=10).mean().iloc[-2])
+                        ema20 = float(df['Close'].ewm(span=20).mean().iloc[-2])
+                        ema60 = float(df['Close'].ewm(span=60).mean().iloc[-2])
+                        ema_bull = int(ema5 > ema10 and ema10 > ema20 and ema20 > ema60)
+                        
+                        delta = df['Close'].diff()
+                        gain = (delta.where(delta > 0, 0)).rolling(14).mean().iloc[-2]
+                        loss = (-delta.where(delta < 0, 0)).rolling(14).mean().iloc[-2]
+                        rsi = 100 - (100 / (1 + (gain / (loss + 1e-5))))
+                        
+                        macd_line = df['Close'].ewm(span=12).mean() - df['Close'].ewm(span=26).mean()
+                        macd_sig = macd_line.ewm(span=9).mean()
+                        macd_hist = float((macd_line - macd_sig).iloc[-2])
+                        
+                        sma20 = float(df['Close'].rolling(20).mean().iloc[-2])
+                        std20 = float(df['Close'].rolling(20).std().iloc[-2])
+                        
+                        feature_dict = {
+                            'Gap_0_2': int(0 <= gap_pct < 2), 'Gap_2_4': int(2 <= gap_pct < 4),
+                            'Gap_4_6': int(4 <= gap_pct < 6), 'Gap_6_9': int(6 <= gap_pct < 9), 'Gap_Over_9': int(gap_pct >= 9),
+                            'RVOL': rvol, 'EMA_Bullish': ema_bull, 'RSI_14': rsi, 'RSI_GoldenZone': int(55 < rsi < 75),
+                            'MACD_Hist_Pos': int(macd_hist > 0), 'Close_Above_BB': int(prev_close > sma20 + 2 * std20),
+                            'High_20D': int(prev_close > float(df['High'].rolling(20).max().iloc[-3])),
+                            'High_55D': int(prev_close > float(df['High'].rolling(55).max().iloc[-3])),
+                            'High_120D': int(prev_close > float(df['High'].rolling(120).max().iloc[-3])),
+                            'is_InsideBar': int((df['High'].iloc[-2] < df['High'].iloc[-3]) and (df['Low'].iloc[-2] > df['Low'].iloc[-3])),
+                            'is_Marubozu': int((abs(prev_close - float(df['Open'].iloc[-2])) / ((df['High'].iloc[-2] - df['Low'].iloc[-2]) + 1e-5)) > 0.8),
+                            'ATR_Ratio': atr_ratio
+                        }
+                        
+                        X_input = pd.DataFrame([feature_dict]).fillna(0)
+                        if hasattr(ml_model, "feature_names_in_"):
+                            X_input = X_input.reindex(columns=ml_model.feature_names_in_, fill_value=0)
+                        
+                        prob = float(ml_model.predict_proba(X_input)[0][1] * 100)
+                        if prob > max_prob_found:
+                            max_prob_found = prob
 
-        if all_scored:
-            sorted_candidates = sorted(all_scored, key=lambda x: x["prob"], reverse=True)[:30]
-            st.markdown("### 🎯 請選擇欲同步至「09:10 微觀狙擊」的觀察名單：")
-            
-            # 使用超級穩定的 st.multiselect，徹底避開前端 CSS 載入失敗問題
-            options_dict = {f"{item['symbol']} {item['name']} (AI勝率: {item['prob']}%, ATR: {item['atr']}%)": item for item in sorted_candidates}
-            
-            selected_keys = st.multiselect(
-                "勾選標的（可隨時新增/刪除）：",
-                options=list(options_dict.keys()),
-                default=list(options_dict.keys())
-            )
-            
-            st.session_state.watchlist = [options_dict[k] for k in selected_keys]
-            st.success(f"✔️ 已成功同步 `{len(st.session_state.watchlist)}` 檔選取標的至「步驟二：09:10 當沖狙擊池」！")
-            
-            # 預覽表格
-            if st.session_state.watchlist:
-                st.dataframe(pd.DataFrame(st.session_state.watchlist).rename(columns={
-                    "symbol": "代號", "name": "名稱", "prob": "AI勝率(%)", "rvol": "昨日RVOL", "atr": "日震幅ATR(%)", "sl": "建議停損", "tp": "建議停利"
-                }), use_container_width=True)
+                        clean_symbol = ticker.replace(".TW", "").replace(".TWO", "")
+                        scored_entry = {
+                            "symbol": clean_symbol,
+                            "name": stock_name,
+                            "prob": round(prob, 1),
+                            "rvol": round(rvol, 2),
+                            "atr": round(atr_ratio, 2),
+                            "sl": round(current_p - (1.2 * atr_14_val), 2),
+                            "tp": round(current_p + (2.5 * atr_14_val), 2)
+                        }
+                        all_scored.append(scored_entry)
+                            
+                    except Exception:
+                        death_toll["7. 特徵計算或 AI 預測異常"] += 1
+                        
+                progress_bar.progress(processed / len(tickers_list))
+                gc.collect() # 手動觸發記憶體回收，預防 OOM 崩潰
+
+            st.markdown("### 📊 【除錯報告】篩選統計")
+            st.json(death_toll)
+
+            if all_scored:
+                sorted_candidates = sorted(all_scored, key=lambda x: x["prob"], reverse=True)[:30]
+                st.markdown("### 🎯 請選擇欲同步至「09:10 微觀狙擊」的觀察名單：")
+                
+                options_dict = {f"{item['symbol']} {item['name']} (AI勝率: {item['prob']}%, ATR: {item['atr']}%)": item for item in sorted_candidates}
+                
+                selected_keys = st.multiselect(
+                    "勾選標的（可隨時新增/刪除）：",
+                    options=list(options_dict.keys()),
+                    default=list(options_dict.keys())
+                )
+                
+                st.session_state.watchlist = [options_dict[k] for k in selected_keys]
+                st.success(f"✔️ 已成功同步 `{len(st.session_state.watchlist)}` 檔選取標的至「步驟二：09:10 當沖狙擊池」！")
+                
+                if st.session_state.watchlist:
+                    st.dataframe(pd.DataFrame(st.session_state.watchlist).rename(columns={
+                        "symbol": "代號", "name": "名稱", "prob": "AI勝率(%)", "rvol": "昨日RVOL", "atr": "日震幅ATR(%)", "sl": "建議停損", "tp": "建議停利"
+                    }), use_container_width=True)
+
+        except Exception as global_err:
+            st.error(f"⚠️ 掃描中途遇到網路連線限制或 API 阻斷：{str(global_err)}")
+            st.info("💡 建議將目標範圍切換為『🔥 精選熱門高流動性當沖庫』重新嘗試，可 100% 避免連線拒絕問題。")
 
 # ------------------------------------------
 # Tab 2: 09:10 當沖狙擊 (Fugle 盤中資料)
