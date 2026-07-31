@@ -37,30 +37,30 @@ else:
 # ==========================================
 # 介面分頁
 # ==========================================
-tab1, tab2 = st.tabs(["🌙 步驟一：盤前 AI 選股 (TWSE 官方連線)", "☀️ 步驟二：09:10 當沖狙擊 (Fugle 微觀)"])
+tab1, tab2 = st.tabs(["🌙 步驟一：盤前 AI 選股 (TWSE 官方防彈連線)", "☀️ 步驟二：09:10 當沖狙擊 (Fugle 微觀)"])
 
 # ------------------------------------------
-# Tab 1: 盤前選股 (TWSE OpenAPI + Yahoo 雙階快篩)
+# Tab 1: 盤前選股 (TWSE OpenAPI 極速快篩 + 單檔安全 AI 評分)
 # ------------------------------------------
 with tab1:
-    st.info("💡 操作提示：系統已直連『台灣證券交易所官方 API』，可在 5 秒內完成全台股 1700+ 檔極速掃描，絕不卡死！")
+    st.info("💡 操作提示：請在「前一天晚上」或「開盤前 08:30」執行此步驟。系統採用防彈架構，秒級初篩後進行精確 AI 評分。")
     
     c1, c2, c3, c4 = st.columns(4)
     with c1: min_win_prob = st.slider("🎯 AI 勝率門檻 (%)", 0, 90, 40, step=5)
-    with c2: min_atr_ratio = st.number_input("⚡ 最低日震幅 ATR (%)", min_value=1.0, value=2.0, step=0.5, help="過濾低波動金融/牛皮股")
+    with c2: min_atr_ratio = st.number_input("⚡ 最低當日震幅 (%)", min_value=1.0, value=2.0, step=0.5, help="過濾低波動金融/牛皮股")
     with c3: min_vol = st.number_input("📉 最低成交量(張)", value=1000, step=500)
     with c4: min_rvol = st.number_input("🔥 昨日 RVOL", min_value=0.5, value=1.0, step=0.1)
 
-    if st.button("🚀 啟動 TWSE 官方極速掃描 (1700+ 檔)"):
+    if st.button("🚀 啟動TWSE官方防彈大掃描"):
         if not ml_model: st.stop()
 
-        st.markdown("### ⚡ 第一階段：呼叫證交所官方 API 進行全市場秒級初篩...")
+        st.markdown("### ⚡ 第一階段：呼叫證交所官方 API 進行全市場 1700+ 檔秒級篩選...")
         progress_bar = st.progress(0.1)
         
         headers = {'User-Agent': 'Mozilla/5.0'}
         candidates = {}
         
-        # 1. 抓取上市股票當日行情
+        # 1. 抓取上市股票當日行情 (TWSE OpenAPI)
         try:
             resp_twse = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", headers=headers, timeout=10)
             if resp_twse.status_code == 200:
@@ -70,19 +70,20 @@ with tab1:
                     try:
                         vol = float(str(item.get('TradeVolume', 0)).replace(',', '')) / 1000.0
                         close_p = float(str(item.get('ClosingPrice', 0)).replace(',', ''))
-                        open_p = float(str(item.get('OpeningPrice', 0)).replace(',', ''))
                         high_p = float(str(item.get('HighestPrice', 0)).replace(',', ''))
                         low_p = float(str(item.get('LowestPrice', 0)).replace(',', ''))
                         
-                        # 初篩條件：四碼個股、非KY、成交量大於門檻、非平盤死魚股
+                        # 當日震幅估計
+                        day_range_pct = ((high_p - low_p) / close_p) * 100 if close_p > 0 else 0
+                        
                         if len(code) == 4 and code.isdigit() and "KY" not in name:
-                            if vol >= min_vol and close_p > 0:
-                                candidates[f"{code}.TW"] = {"name": name, "close": close_p, "vol": vol}
+                            if vol >= min_vol and close_p > 0 and day_range_pct >= min_atr_ratio:
+                                candidates[f"{code}.TW"] = {"name": name, "close": close_p, "vol": vol, "range": day_range_pct}
                     except: pass
         except Exception as e:
-            st.error(f"連線證交所 API 失敗：{e}")
+            st.error(f"連線上市證交所 API 失敗：{e}")
 
-        # 2. 抓取上櫃股票當日行情
+        # 2. 抓取上櫃股票當日行情 (TPEx OpenAPI)
         try:
             resp_tpex = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes", headers=headers, timeout=10)
             if resp_tpex.status_code == 200:
@@ -92,56 +93,55 @@ with tab1:
                     try:
                         vol = float(str(item.get('TradingVolume', 0)).replace(',', '')) / 1000.0
                         close_p = float(str(item.get('Close', 0)).replace(',', ''))
+                        high_p = float(str(item.get('High', 0)).replace(',', ''))
+                        low_p = float(str(item.get('Low', 0)).replace(',', ''))
+                        day_range_pct = ((high_p - low_p) / close_p) * 100 if close_p > 0 else 0
+                        
                         if len(code) == 4 and code.isdigit() and "KY" not in name:
-                            if vol >= min_vol and close_p > 0:
-                                candidates[f"{code}.TWO"] = {"name": name, "close": close_p, "vol": vol}
+                            if vol >= min_vol and close_p > 0 and day_range_pct >= min_atr_ratio:
+                                candidates[f"{code}.TWO"] = {"name": name, "close": close_p, "vol": vol, "range": day_range_pct}
                     except: pass
         except Exception as e: pass
 
         progress_bar.progress(0.4)
-        st.success(f"✔️ TWSE 官方 API 初篩完成！已從 1700+ 檔中精準鎖定 `{len(candidates)}` 檔高流動性潛力標的。")
+        
+        # 依成交張數由大到小排序，精選前 30 檔最具當沖動能的焦點股
+        sorted_candidates = sorted(candidates.items(), key=lambda x: x[1]["vol"], reverse=True)[:30]
+        st.success(f"✔️ 初篩完成！成功擊殺金融/牛皮股，鎖定全市場成交量最大、振幅最強的 `{len(sorted_candidates)}` 檔核心標的。")
 
-        if len(candidates) == 0:
-            st.warning("⚠️ 沒有股票符合初篩條件，請降低『最低成交量』後重試。")
+        if len(sorted_candidates) == 0:
+            st.warning("⚠️ 沒有股票符合初篩條件，請嘗試調低『最低成交量』或『最低當日震幅』。")
             st.stop()
 
-        # 3. 第二階段：僅針對初篩通過的 ~100 檔標的下載 K 線特徵 (避開 Yahoo 限流)
-        st.markdown("### 🤖 第二階段：AI 模型特徵運算與勝率評估中...")
-        candidate_tickers = list(candidates.keys())
+        # 3. 第二階段：單檔安全加載 K 線並進行 AI 模型特徵評分 (0% 崩潰風險)
+        st.markdown("### 🤖 第二階段：AI 模型評分中...")
         all_scored = []
         
-        # 以小批次下載 125 日 K 線
-        chunk_size = 30
-        chunks = [candidate_tickers[i:i + chunk_size] for i in range(0, len(candidate_tickers), chunk_size)]
-        
-        for idx, chunk in enumerate(chunks):
+        total_items = len(sorted_candidates)
+        for idx, (ticker, info) in enumerate(sorted_candidates):
             try:
-                data = yf.download(chunk, period="1y", interval="1d", group_by='ticker', threads=True, progress=False)
-                for ticker in chunk:
-                    try:
-                        df_stock = data[ticker] if len(chunk) > 1 else data
-                        df = df_stock.dropna(subset=['Open', 'High', 'Low', 'Close', 'Volume'])
-                        df = df[df['Volume'] > 0]
-                        
-                        if len(df) < 125: continue
-                        
-                        open_p = float(df['Open'].iloc[-1])
-                        prev_close = float(df['Close'].iloc[-2])
-                        current_p = float(df['Close'].iloc[-1])
-                        vol_today = float(df['Volume'].iloc[-1])
-                        
-                        tr = pd.concat([df['High']-df['Low'], (df['High']-df['Close'].shift(1)).abs(), (df['Low']-df['Close'].shift(1)).abs()], axis=1).max(axis=1)
-                        atr_14_val = float(tr.rolling(14).mean().iloc[-2])
-                        atr_ratio = (atr_14_val / prev_close) * 100
-                        
-                        if atr_ratio < min_atr_ratio: continue
-                        
-                        gap_pct = ((open_p - prev_close) / prev_close) * 100
-                        vol_ma20 = float(df['Volume'].iloc[-21:-1].mean())
-                        rvol = vol_today / (vol_ma20 + 1e-5)
-                        
-                        if rvol < min_rvol: continue
-                        
+                # 使用安全單檔歷史讀取，絕不卡死記憶體
+                tk = yf.Ticker(ticker)
+                df = tk.history(period="1y")
+                
+                df = df.dropna(subset=['Open', 'High', 'Low', 'Close', 'Volume'])
+                df = df[df['Volume'] > 0]
+                
+                if len(df) >= 125:
+                    open_p = float(df['Open'].iloc[-1])
+                    prev_close = float(df['Close'].iloc[-2])
+                    current_p = float(df['Close'].iloc[-1])
+                    vol_today = float(df['Volume'].iloc[-1])
+                    
+                    tr = pd.concat([df['High']-df['Low'], (df['High']-df['Close'].shift(1)).abs(), (df['Low']-df['Close'].shift(1)).abs()], axis=1).max(axis=1)
+                    atr_14_val = float(tr.rolling(14).mean().iloc[-2])
+                    atr_ratio = (atr_14_val / prev_close) * 100
+                    
+                    gap_pct = ((open_p - prev_close) / prev_close) * 100
+                    vol_ma20 = float(df['Volume'].iloc[-21:-1].mean())
+                    rvol = vol_today / (vol_ma20 + 1e-5)
+                    
+                    if rvol >= min_rvol:
                         ema5 = float(df['Close'].ewm(span=5).mean().iloc[-2])
                         ema10 = float(df['Close'].ewm(span=10).mean().iloc[-2])
                         ema20 = float(df['Close'].ewm(span=20).mean().iloc[-2])
@@ -182,7 +182,7 @@ with tab1:
                         clean_symbol = ticker.replace(".TW", "").replace(".TWO", "")
                         scored_entry = {
                             "symbol": clean_symbol,
-                            "name": candidates[ticker]["name"],
+                            "name": info["name"],
                             "prob": round(prob, 1),
                             "rvol": round(rvol, 2),
                             "atr": round(atr_ratio, 2),
@@ -190,17 +190,15 @@ with tab1:
                             "tp": round(current_p + (2.5 * atr_14_val), 2)
                         }
                         all_scored.append(scored_entry)
-                    except: pass
             except: pass
             
-            progress_bar.progress(0.4 + 0.6 * ((idx + 1) / len(chunks)))
-            gc.collect()
+            progress_bar.progress(0.4 + 0.6 * ((idx + 1) / total_items))
 
         if all_scored:
-            sorted_candidates = sorted(all_scored, key=lambda x: x["prob"], reverse=True)[:30]
+            sorted_results = sorted(all_scored, key=lambda x: x["prob"], reverse=True)
             st.markdown("### 🎯 請選擇欲同步至「09:10 微觀狙擊」的觀察名單：")
             
-            options_dict = {f"{item['symbol']} {item['name']} (AI勝率: {item['prob']}%, ATR: {item['atr']}%)": item for item in sorted_candidates}
+            options_dict = {f"{item['symbol']} {item['name']} (AI勝率: {item['prob']}%, ATR: {item['atr']}%)": item for item in sorted_results}
             
             selected_keys = st.multiselect(
                 "勾選標的（可隨時新增/刪除）：",
@@ -209,14 +207,14 @@ with tab1:
             )
             
             st.session_state.watchlist = [options_dict[k] for k in selected_keys]
-            st.success(f"🎉 盤前選股完美完成！已成功同步 `{len(st.session_state.watchlist)}` 檔選取標的至「步驟二：09:10 當沖狙擊池」！")
+            st.success(f"🎉 盤前掃描完美成功！已安全同步 `{len(st.session_state.watchlist)}` 檔標的至「步驟二：09:10 當沖狙擊池」！")
             
             if st.session_state.watchlist:
                 st.dataframe(pd.DataFrame(st.session_state.watchlist).rename(columns={
                     "symbol": "代號", "name": "名稱", "prob": "AI勝率(%)", "rvol": "昨日RVOL", "atr": "日震幅ATR(%)", "sl": "建議停損", "tp": "建議停利"
                 }), use_container_width=True)
         else:
-            st.warning("⚠️ 經 AI 計算後無合格標的，請嘗試調低門檻。")
+            st.warning("⚠️ 沒有股票符合全部過濾條件，請適度放寬『昨日 RVOL』門檻。")
 
 # ------------------------------------------
 # Tab 2: 09:10 當沖狙擊 (Fugle 盤中資料)
