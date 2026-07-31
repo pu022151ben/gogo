@@ -1,247 +1,133 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
-import plotly.graph_objects as go
-import requests
 import numpy as np
 import joblib
 import os
+import requests
 
-# --- 頁面基本配置 ---
-st.set_page_config(
-    page_title="專屬智慧交易儀表板 V4.1",
-    page_icon="📈",
-    layout="wide"
-)
+st.set_page_config(page_title="AI 2.0 專業量化交易儀表板", page_icon="⚡", layout="wide")
+st.title("⚡ AI 2.0 專業量化交易與選股儀表板 (ATR 風控版)")
 
-st.title("📈 專屬智慧交易與選股儀表板 V4.1 (AI 機器學習彈性控盤版)")
-
-# --- 載入預先訓練好的 AI 模型 ---
 @st.cache_resource
-def load_ml_model():
-    if os.path.exists("model.pkl"):
-        return joblib.load("model.pkl")
-    return None
+def load_model():
+    return joblib.load("model.pkl") if os.path.exists("model.pkl") else None
 
-ml_model = load_ml_model()
-
+ml_model = load_model()
 if ml_model:
-    st.sidebar.success("🤖 AI 機器學習預測引擎：已連線 (model.pkl)")
+    st.sidebar.success("🤖 AI 2.0 預測引擎：已連線")
 else:
-    st.sidebar.warning("⚠️ 尚未偵測到 model.pkl，請先執行 train_model.py 訓練模型。")
+    st.sidebar.warning("⚠️ 請先執行 train_model.py")
 
-# --- 自動抓取台股清單 ---
-@st.cache_data(ttl=86400)
-def get_all_taiwan_stocks():
-    stock_dict = {}
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    try:
-        url_twse = "https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL"
-        resp = requests.get(url_twse, headers=headers, timeout=10)
-        if resp.status_code == 200:
-            for item in resp.json():
-                code = str(item.get('Code', '')).strip()
-                name = str(item.get('Name', '')).strip()
-                if len(code) == 4 and code.isdigit():
-                    stock_dict[f"{code}.TW"] = name
-    except Exception:
-        pass
-        
-    try:
-        url_tpex = "https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O"
-        resp = requests.get(url_tpex, headers=headers, timeout=10)
-        if resp.status_code == 200:
-            for item in resp.json():
-                code = str(item.get('SecuritiesCompanyCode', '')).strip()
-                name = str(item.get('CompanyName', '')).strip()
-                if len(code) == 4 and code.isdigit():
-                    stock_dict[f"{code}.TWO"] = name
-    except Exception:
-        pass
+st.subheader("⚙️ 專業量化濾網設定 (Quant Filters)")
+r1_1, r1_2, r1_3 = st.columns(3)
+with r1_1:
+    min_win_prob = st.slider("🎯 AI 預測勝率門檻 (%)", 50, 90, 60, step=5)
+with r1_2:
+    min_rvol = st.number_input("🔥 RVOL 爆發動能 (>2)", min_value=0.5, value=1.5, step=0.1)
+with r1_3:
+    require_ema = st.checkbox("📈 嚴格要求 EMA 多頭排列", value=False)
 
-    return stock_dict
-
-TOP100_CODES = [
-    "2330.TW", "2317.TW", "2454.TW", "2308.TW", "2303.TW", "2382.TW", "2881.TW", "2882.TW",
-    "3260.TW", "8271.TWO", "3362.TW", "2451.TW", "4967.TW", "3441.TWO", "3504.TW", "4976.TW", "3312.TW"
-]
-
-# --- 側邊欄選單 ---
-st.sidebar.header("📌 功能選單")
-menu = st.sidebar.radio("", ["1. AI 機器學習預測當沖篩選", "2. 美股即時行情觀測", "3. 玉山證券帳務與交易"])
-
-# ==========================================
-# 功能一：AI 機器學習選股模組
-# ==========================================
-if menu == "1. AI 機器學習預測當沖篩選":
-    st.header("🎯 機器學習勝率預測與彈性風控模組")
+if st.button("🚀 啟動全市場 AI 掃描"):
+    # 測試用清單 (實務可替換為上市櫃全檔)
+    watchlist = ["2330.TW", "2317.TW", "2454.TW", "2382.TW", "2603.TW", "3231.TW", "3711.TW", "3035.TW", "3443.TW", "3260.TWO"]
+    results = []
     
-    all_stocks = get_all_taiwan_stocks()
-    st.success(f"🌐 已成功載入全台股資料庫，共收錄 **{len(all_stocks)}** 檔普通股。")
-    
-    st.subheader("⚙️ 多維度篩選與風控彈性設定")
-    
-    # 第一排參數控制
-    r1_1, r1_2, r1_3 = st.columns(3)
-    with r1_1:
-        scan_scope = st.radio("掃描範圍：", ["🚀 全台股大掃描 (1800+ 檔)", "🔥 精選熱門當沖庫"], horizontal=True)
-    with r1_2:
-        min_win_prob = st.slider("🤖 AI 預測勝率門檻 (%)", 40, 90, 50, step=5, help="若搜尋數量過少，可適度拉低勝率門檻（如 50%~55%）")
-    with r1_3:
-        sl_pct = st.number_input("風控停損比例 (%)", min_value=0.5, max_value=5.0, value=1.5, step=0.1)
-
-    # 第二排參數控制
-    r2_1, r2_2, r2_3 = st.columns(3)
-    with r2_1:
-        gap_min, gap_max = st.slider("📈 開盤溢價率區間 (%)", 0.0, 10.0, (1.0, 7.0), step=0.5)
-    with r2_2:
-        min_vol = st.number_input("📊 昨日成交量門檻（張）", min_value=0, value=500, step=100)
-    with r2_3:
-        min_current_pct = st.number_input("⚡ 最低當前漲幅 (%)", min_value=-5.0, max_value=5.0, value=0.0, step=0.5)
-
-    # 第三排開關控制
-    r3_1, r3_2 = st.columns(2)
-    with r3_1:
-        exclude_ky = st.checkbox("🛡️ 自動排除 -KY 股", value=True)
-    with r3_2:
-        enable_orb = st.checkbox("🔥 ORB 續強過濾 (現價 ≥ 開盤價)", value=True, help="取消勾選可釋放更多潛在開高拉回的標的")
-
-    if st.button("🚀 開始 AI 大數據即時勝率掃描"):
-        target_stocks = all_stocks if "全台股" in scan_scope else {k: all_stocks.get(k, k) for k in TOP100_CODES if k in all_stocks}
-        
-        results = []
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        tickers_list = list(target_stocks.keys())
-        total_count = len(tickers_list)
-        
-        chunk_size = 100
-        chunks = [tickers_list[i:i + chunk_size] for i in range(0, total_count, chunk_size)]
-        
-        matched_count = 0
-        processed_count = 0
-        
-        for chunk_idx, chunk_tickers in enumerate(chunks):
-            status_text.text(f"AI 引擎正在計算全市場特徵矩陣 (第 {chunk_idx + 1} / {len(chunks)} 批次)...")
-            try:
-                data = yf.download(chunk_tickers, period="30d", interval="1d", group_by='ticker', threads=True, progress=False)
+    progress = st.progress(0)
+    for idx, ticker in enumerate(watchlist):
+        try:
+            df = yf.download(ticker, period="60d", interval="1d", progress=False).dropna()
+            if len(df) < 50: continue
+            
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
                 
-                for ticker in chunk_tickers:
-                    processed_count += 1
-                    try:
-                        df_stock = data[ticker] if len(chunk_tickers) > 1 else data
-                        df_clean = df_stock.dropna(subset=['Open', 'High', 'Low', 'Close', 'Volume'])
-                        
-                        if len(df_clean) >= 20:
-                            open_p = float(df_clean['Open'].iloc[-1])
-                            prev_close = float(df_clean['Close'].iloc[-2])
-                            current_price = float(df_clean['Close'].iloc[-1])
-                            prev_vol_lots = float(df_clean['Volume'].iloc[-2]) / 1000.0
-                            stock_name = target_stocks.get(ticker, "未知")
-                            
-                            # 1. KY 股過濾
-                            if exclude_ky and ("KY" in stock_name or "KY" in ticker):
-                                continue
-                                
-                            # 2. 成交量門檻過濾
-                            if prev_vol_lots < min_vol:
-                                continue
-                                
-                            gap_rate = ((open_p - prev_close) / prev_close) * 100
-                            current_pct = ((current_price - prev_close) / prev_close) * 100
-                            daytrade_ret = ((current_price - open_p) / open_p) * 100
-                            
-                            # 3. 溢價率與漲幅過濾
-                            if gap_min <= gap_rate <= gap_max and current_pct >= min_current_pct:
-                                # 4. ORB 過濾
-                                orb_pass = (current_price >= open_p) if enable_orb else True
-                                
-                                if orb_pass:
-                                    # --- 提取即時特徵向量 ---
-                                    vol_ma5 = float(df_clean['Volume'].iloc[-7:-2].mean())
-                                    vol_ratio = (prev_vol_lots * 1000) / (vol_ma5 + 1e-5)
-                                    ma5 = float(df_clean['Close'].iloc[-6:-1].mean())
-                                    ma20 = float(df_clean['Close'].iloc[-21:-1].mean())
-                                    dist_ma5 = ((prev_close - ma5) / (ma5 + 1e-5)) * 100
-                                    dist_ma20 = ((prev_close - ma20) / (ma20 + 1e-5)) * 100
-                                    max_20d = float(df_clean['High'].iloc[-21:-1].max())
-                                    is_breakout = 1 if prev_close >= max_20d else 0
-                                    
-                                    highs = df_clean['High'].iloc[-15:-1].values
-                                    lows = df_clean['Low'].iloc[-15:-1].values
-                                    closes = df_clean['Close'].iloc[-16:-2].values
-                                    tr = np.maximum(highs - lows, np.maximum(np.abs(highs - closes), np.abs(lows - closes)))
-                                    atr14 = (np.mean(tr) / (prev_close + 1e-5)) * 100
-                                    
-                                    X_input = pd.DataFrame([{
-                                        'gap_rate': gap_rate,
-                                        'vol_ratio': vol_ratio,
-                                        'dist_ma5': dist_ma5,
-                                        'dist_ma20': dist_ma20,
-                                        'is_breakout': is_breakout,
-                                        'atr14': atr14
-                                    }])
-                                    
-                                    # --- AI 預測勝率 ---
-                                    if ml_model:
-                                        win_prob = float(ml_model.predict_proba(X_input)[0][1]) * 100
-                                    else:
-                                        win_prob = 50.0
-                                        
-                                    if win_prob >= min_win_prob:
-                                        matched_count += 1
-                                        stop_loss = round(open_p * (1 - sl_pct / 100), 2)
-                                        take_profit = round(open_p * 1.03, 2)
-                                        code_clean = ticker.replace(".TW", "").replace(".TWO", "")
-                                        
-                                        results.append({
-                                            "AI 預估勝率": f"{win_prob:.1f}%",
-                                            "股票代號": code_clean,
-                                            "股票名稱": stock_name,
-                                            "昨日成交量(張)": int(prev_vol_lots),
-                                            "開盤溢價率 (%)": f"{gap_rate:.2f}%",
-                                            "今日漲跌幅 (%)": f"{current_pct:+.2f}%",
-                                            "目前最新價": round(current_price, 2),
-                                            "當沖潛在報酬 (%)": f"{daytrade_ret:+.2f}%",
-                                            "建議停損價 (SL)": stop_loss,
-                                            "目標停利 (TP)": take_profit,
-                                            "raw_prob": win_prob
-                                        })
-                    except Exception:
-                        continue
-            except Exception:
-                pass
+            open_p = float(df['Open'].iloc[-1])
+            prev_close = float(df['Close'].iloc[-2])
+            current_p = float(df['Close'].iloc[-1])
+            vol_today = float(df['Volume'].iloc[-1])
             
-            progress_bar.progress(processed_count / total_count)
+            # --- 核心特徵計算 (與訓練模組 100% 映射) ---
+            gap_pct = ((open_p - prev_close) / prev_close) * 100
+            gap_bins = {
+                'Gap_0_2': int(0 <= gap_pct < 2),
+                'Gap_2_4': int(2 <= gap_pct < 4),
+                'Gap_4_6': int(4 <= gap_pct < 6),
+                'Gap_6_9': int(6 <= gap_pct < 9),
+                'Gap_Over_9': int(gap_pct >= 9)
+            }
             
-        status_text.success(f"🎉 掃描完成！達到 AI 預測勝率 {min_win_prob}% 以上標的共 {len(results)} 檔！")
+            vol_ma20 = float(df['Volume'].iloc[-21:-1].mean())
+            rvol = vol_today / (vol_ma20 + 1e-5)
+            if rvol < min_rvol: continue # RVOL 濾網
+            
+            ema5 = float(df['Close'].ewm(span=5, adjust=False).mean().iloc[-2])
+            ema10 = float(df['Close'].ewm(span=10, adjust=False).mean().iloc[-2])
+            ema20 = float(df['Close'].ewm(span=20, adjust=False).mean().iloc[-2])
+            ema60 = float(df['Close'].ewm(span=60, adjust=False).mean().iloc[-2])
+            ema_bull = int(ema5 > ema10 and ema10 > ema20 and ema20 > ema60)
+            
+            if require_ema and not ema_bull: continue # EMA 濾網
+            
+            delta = df['Close'].diff()
+            gain = (delta.where(delta > 0, 0)).rolling(14).mean().iloc[-2]
+            loss = (-delta.where(delta < 0, 0)).rolling(14).mean().iloc[-2]
+            rsi = 100 - (100 / (1 + (gain / (loss + 1e-5))))
+            
+            macd_line = df['Close'].ewm(span=12).mean() - df['Close'].ewm(span=26).mean()
+            macd_sig = macd_line.ewm(span=9).mean()
+            macd_hist = float((macd_line - macd_sig).iloc[-2])
+            
+            sma20 = float(df['Close'].rolling(20).mean().iloc[-2])
+            std20 = float(df['Close'].rolling(20).std().iloc[-2])
+            
+            tr1 = df['High'] - df['Low']
+            tr2 = (df['High'] - df['Close'].shift(1)).abs()
+            tr3 = (df['Low'] - df['Close'].shift(1)).abs()
+            tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+            atr_14_val = float(tr.rolling(14).mean().iloc[-2])
+            
+            # 建立輸入矩陣
+            feature_dict = {
+                **gap_bins,
+                'RVOL': rvol,
+                'EMA_Bullish': ema_bull,
+                'RSI_14': rsi,
+                'RSI_GoldenZone': int(55 < rsi < 75),
+                'MACD_Hist_Pos': int(macd_hist > 0),
+                'Close_Above_BB': int(prev_close > sma20 + 2 * std20),
+                'High_20D': int(prev_close > float(df['High'].rolling(20).max().iloc[-3])),
+                'High_55D': int(prev_close > float(df['High'].rolling(55).max().iloc[-3])),
+                'High_120D': int(prev_close > float(df['High'].rolling(120).max().iloc[-3])),
+                'is_InsideBar': int((df['High'].iloc[-2] < df['High'].iloc[-3]) and (df['Low'].iloc[-2] > df['Low'].iloc[-3])),
+                'is_Marubozu': int((abs(prev_close - float(df['Open'].iloc[-2])) / ((df['High'].iloc[-2] - df['Low'].iloc[-2]) + 1e-5)) > 0.8),
+                'ATR_Ratio': (atr_14_val / prev_close) * 100
+            }
+            
+            if ml_model:
+                X_input = pd.DataFrame([feature_dict])
+                prob = ml_model.predict_proba(X_input)[0][1] * 100
+                
+                if prob >= min_win_prob:
+                    # 動態 ATR 風控價格
+                    sl_price = round(open_p - (1.2 * atr_14_val), 2)
+                    tp_price = round(open_p + (2.5 * atr_14_val), 2)
+                    
+                    results.append({
+                        "代號": ticker.replace(".TW", "").replace(".TWO", ""),
+                        "AI 勝率": f"{prob:.1f}%",
+                        "RVOL": f"{rvol:.2f}",
+                        "EMA 狀態": "多頭" if ema_bull else "盤整/空頭",
+                        "現價": round(current_p, 2),
+                        "停損 (SL 1.2ATR)": sl_price,
+                        "停利 (TP 2.5ATR)": tp_price
+                    })
+        except Exception:
+            pass
+        progress.progress((idx + 1) / len(watchlist))
         
-        if results:
-            res_df = pd.DataFrame(results).sort_values(by="raw_prob", ascending=False).drop(columns=["raw_prob"])
-            st.dataframe(res_df, use_container_width=True)
-        else:
-            st.warning("今日暫無達標之高勝率 AI 推薦標的（建議調整勝率門檻或溢價率區間重試）。")
-
-# ==========================================
-# 功能二：美股即時行情觀測
-# ==========================================
-elif menu == "2. 美股即時行情觀測":
-    st.header("🇺🇸 美股重點標的與技術圖表")
-    DEFAULT_US_STOCKS = ["NVDA", "TSLA", "AAPL", "MSFT", "GOOGL", "AMD"]
-    us_symbol = st.selectbox("選擇美股標的", DEFAULT_US_STOCKS)
-    df_us = yf.Ticker(us_symbol).history(period="3mo")
-    
-    if not df_us.empty:
-        fig = go.Figure(data=[go.Candlestick(
-            x=df_us.index, open=df_us['Open'], high=df_us['High'], low=df_us['Low'], close=df_us['Close'], name="K線"
-        )])
-        fig.update_layout(xaxis_rangeslider_visible=False, template="plotly_dark", height=450)
-        st.plotly_chart(fig, use_container_width=True)
-
-# ==========================================
-# 功能三：玉山證券帳務與交易
-# ==========================================
-elif menu == "3. 玉山證券帳務與交易":
-    st.header("🏦 玉山證券富果 API 連線測試")
-    st.info("可在這裡整合玉山富果 API 進行自動下單連動。")
+    if results:
+        st.success(f"掃描完成！共 {len(results)} 檔達標。")
+        st.dataframe(pd.DataFrame(results))
+    else:
+        st.warning("今日無達標標的。")
