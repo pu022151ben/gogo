@@ -88,7 +88,7 @@ if st.button("🚀 啟動 AI x VWAP 雙階段掃描"):
     for chunk_idx, chunk_tickers in enumerate(chunks):
         status_text.text(f"計算日K特徵矩陣 (第 {chunk_idx + 1} / {len(chunks)} 批次)...")
         try:
-            data = yf.download(chunk_tickers, period="60d", interval="1d", group_by='ticker', threads=True, progress=False)
+            data = yf.download(chunk_tickers, period="60mo", interval="1d", group_by='ticker', threads=True, progress=False)
             for ticker in chunk_tickers:
                 processed_count += 1
                 try:
