@@ -1,0 +1,9 @@
+streamlit
+pandas
+yfinance
+lightgbm
+scikit-learn
+joblib
+plotly
+requests
+numpy
