@@ -117,6 +117,19 @@ with tab1:
             today_news = fetch_yahoo_news()
             
             # 2. 連線真實市場：建立自選動能觀察池
+            
+            # 建立股票代號與中文名稱的快速翻譯對照表
+            stock_names = {
+                "2337": "旺宏",
+                "3481": "群創",
+                "6770": "力積電",
+                "2344": "華邦電",
+                "3231": "緯創",
+                "2408": "南亞科",
+                "2317": "鴻海",
+                "2618": "長榮航"
+            }
+            
             watch_list = ["2337.TW", "3481.TW", "6770.TW", "2344.TW", "3231.TW", "2408.TW", "2317.TW", "2618.TW"]
             real_data = []
             
@@ -142,9 +155,11 @@ with tab1:
                         
                         # 🌟 核心濾網：只挑出達標的股票
                         if atr >= min_atr and rvol >= min_rvol:
+                            symbol_num = ticker.replace(".TW", "")
                             real_data.append({
-                                "symbol": ticker.replace(".TW", ""),
-                                "name": ticker.replace(".TW", ""), # 實戰版暫以代號顯示
+                                "symbol": symbol_num,
+                                # 透過對照表抓取中文，如果未來新增了對照表沒有的股票，就會自動顯示代號防呆
+                                "name": stock_names.get(symbol_num, symbol_num), 
                                 "族群": "熱門股",
                                 "強度": strength,
                                 "現價": round(yesterday['Close'], 2),
