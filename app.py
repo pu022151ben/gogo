@@ -116,16 +116,53 @@ with tab1:
             # 1. 抓取新聞
             today_news = fetch_yahoo_news()
             
-            # 2. 建立目標觀察池 (此處為模擬您的資料庫篩選結果)
-            mock_data = [
-                {"symbol": "3481", "name": "群創", "族群": "面板", "強度": "跟隨大盤", "現價": 47.8, "atr": 6.87, "昨日總量": 50000},
-                {"symbol": "6770", "name": "力積電", "族群": "晶圓代工", "強度": "💪 抗跌領漲", "現價": 66.1, "atr": 6.23, "昨日總量": 32000},
-                {"symbol": "2344", "name": "華邦電", "族群": "記憶體", "強度": "💪 抗跌領漲", "現價": 169.0, "atr": 5.73, "昨日總量": 45000},
-                {"symbol": "3231", "name": "緯創", "族群": "AI伺服器", "強度": "跟隨大盤", "現價": 193.0, "atr": 5.59, "昨日總量": 80000},
-            ]
-            df = pd.DataFrame(mock_data)
-            df['動態停損'] = df['現價'] - (df['現價'] * df['atr'] / 100 * 0.5) # 模擬 ATR 停損點
-            df['最終勝率'] = 50 # 基礎勝率設定
+            # 2. 連線真實市場：建立自選動能觀察池
+            watch_list = ["2337.TW", "3481.TW", "6770.TW", "2344.TW", "3231.TW", "2408.TW", "2317.TW", "2618.TW"]
+            real_data = []
+            
+            for ticker in watch_list:
+                try:
+                    stock = yf.Ticker(ticker)
+                    # 抓取過去 20 天資料以計算均量與 ATR
+                    hist = stock.history(period="20d") 
+                    if len(hist) >= 2:
+                        yesterday = hist.iloc[-1]
+                        day_before = hist.iloc[-2]
+                        
+                        # 計算真實波動幅度 ATR (%)
+                        atr = ((yesterday['High'] - yesterday['Low']) / yesterday['Close']) * 100
+                        
+                        # 計算 RVOL (昨日總量 / 20日均量)
+                        avg_vol = hist['Volume'].mean()
+                        rvol = yesterday['Volume'] / avg_vol if avg_vol > 0 else 0
+                        
+                        # 判定 RS 強度 (簡化版：單日漲跌幅是否為正)
+                        pct_change = ((yesterday['Close'] - day_before['Close']) / day_before['Close']) * 100
+                        strength = "💪 抗跌領漲" if pct_change > 0 else "跟隨大盤"
+                        
+                        # 🌟 核心濾網：只挑出達標的股票
+                        if atr >= min_atr and rvol >= min_rvol:
+                            real_data.append({
+                                "symbol": ticker.replace(".TW", ""),
+                                "name": ticker.replace(".TW", ""), # 實戰版暫以代號顯示
+                                "族群": "熱門股",
+                                "強度": strength,
+                                "現價": round(yesterday['Close'], 2),
+                                "atr": round(atr, 2),
+                                "昨日總量": int(yesterday['Volume'] / 1000) # 換算為張數
+                            })
+                except Exception as e:
+                    continue
+            
+            # 若無符合條件的股票，提供防呆機制
+            if not real_data:
+                st.warning("⚠️ 嚴格濾網下，今日無符合『高波動+爆量』之標的，建議空手觀望！")
+                df = pd.DataFrame()
+            else:
+                df = pd.DataFrame(real_data)
+                # 套用當沖專用極短線停損 (0.25倍)
+                df['動態停損'] = df['現價'] - (df['現價'] * df['atr'] / 100 * 0.25)
+                df['最終勝率'] = 50
             
             # 3. 呼叫 AI 進行判讀
             stock_names = df['name'].tolist()
